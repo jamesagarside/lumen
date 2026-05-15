@@ -1,0 +1,27 @@
+{
+  "name": "lumen-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "solid-js": "^1.9.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.7",
+    "@typescript-eslint/eslint-plugin": "^8.40.0",
+    "@typescript-eslint/parser": "^8.40.0",
+    "eslint": "^9.31.0",
+    "eslint-plugin-solid": "^0.14.5",
+    "tailwindcss": "^4.1.7",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.2",
+    "vite-plugin-solid": "^2.11.10"
+  }
+}

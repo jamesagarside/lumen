@@ -1,0 +1,12 @@
+[package]
+name = "lumen-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust SDK for authoring Lumen plugins"
+
+[dependencies]
+lumen-core = { workspace = true }
+serde = { workspace = true }

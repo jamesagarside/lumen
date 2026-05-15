@@ -1,0 +1,27 @@
+services:
+  lumen:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/jamesagarside/lumen:dev
+    container_name: lumen
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      LUMEN_HTTP_LISTEN: 0.0.0.0:3000
+      LUMEN_LOG_FORMAT: json
+      RUST_LOG: info,lumen_daemon=info
+    volumes:
+      - lumen-data:/var/lib/lumen/data
+      - ./plugins:/var/lib/lumen/plugins:ro
+    # NetFlow / IPFIX / syslog / OTLP listeners will land alongside their
+    # owning issues. Uncomment as they ship:
+    # - "2055:2055/udp"   # NetFlow v5/v9
+    # - "4739:4739/udp"   # IPFIX
+    # - "514:514/udp"     # syslog
+    # - "4317:4317"       # OTLP gRPC
+    # - "4318:4318"       # OTLP HTTP
+
+volumes:
+  lumen-data:
