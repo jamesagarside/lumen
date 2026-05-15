@@ -1,0 +1,39 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node / web
+node_modules/
+dist/
+build/
+.vite/
+.svelte-kit/
+.solid/
+*.tsbuildinfo
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Local data (Lumen runtime artifacts when developing)
+/data/
+/plugins/
+*.duckdb
+*.duckdb.wal
+*.redb
+
+# Logs
+*.log
+logs/
+
+# Claude / agent scratch
+.claude/
