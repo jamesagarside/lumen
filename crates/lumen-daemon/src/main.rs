@@ -4,9 +4,13 @@ use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{error, info};
+
+use crate::ingest::{udp_listener, FlowBus};
+use crate::routes::AppState;
 
 mod config;
+mod ingest;
 mod observability;
 mod routes;
 
@@ -23,7 +27,19 @@ async fn main() -> anyhow::Result<()> {
         "lumen starting"
     );
 
-    let app = build_router(&config);
+    let bus = FlowBus::new();
+    let state = AppState { bus: bus.clone() };
+
+    if let Some(addr) = config.netflow_v5_listen {
+        let bus = bus.clone();
+        tokio::spawn(async move {
+            if let Err(e) = udp_listener::run(addr, udp_listener::NetflowV5Parser, bus).await {
+                error!(listener = "netflow_v5", error = %e, "ingest listener exited");
+            }
+        });
+    }
+
+    let app = build_router(&config, state);
     let listener = TcpListener::bind(config.http_listen)
         .await
         .with_context(|| format!("binding {}", config.http_listen))?;
@@ -37,10 +53,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_router(config: &config::Config) -> Router {
+fn build_router(config: &config::Config, state: AppState) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(routes::healthz))
-        .route("/version", get(routes::version));
+        .route("/version", get(routes::version))
+        .route("/ws/flows", get(routes::ws_flows))
+        .with_state(state);
 
     if let Some(dir) = &config.ui_assets_dir {
         router = router.fallback_service(ServeDir::new(dir));
@@ -84,12 +102,19 @@ mod tests {
         config::Config {
             http_listen: "127.0.0.1:0".parse().unwrap(),
             ui_assets_dir: None,
+            netflow_v5_listen: None,
+        }
+    }
+
+    fn test_state() -> AppState {
+        AppState {
+            bus: FlowBus::new(),
         }
     }
 
     #[tokio::test]
     async fn healthz_returns_200() {
-        let app = build_router(&test_config());
+        let app = build_router(&test_config(), test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -104,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn version_returns_200_with_json() {
-        let app = build_router(&test_config());
+        let app = build_router(&test_config(), test_state());
         let response = app
             .oneshot(
                 Request::builder()
@@ -125,7 +150,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_route_returns_404_when_no_ui_assets() {
-        let app = build_router(&test_config());
+        let app = build_router(&test_config(), test_state());
         let response = app
             .oneshot(
                 Request::builder()

@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 pub struct Config {
     pub http_listen: SocketAddr,
     pub ui_assets_dir: Option<PathBuf>,
+    pub netflow_v5_listen: Option<SocketAddr>,
 }
 
 impl Config {
@@ -21,9 +22,24 @@ impl Config {
             .map(PathBuf::from)
             .filter(|p| p.exists());
 
+        let netflow_v5_listen = parse_optional_socket_addr("LUMEN_NETFLOW_V5_LISTEN")?
+            .or_else(|| Some("0.0.0.0:2055".parse().unwrap()));
+
         Ok(Self {
             http_listen,
             ui_assets_dir,
+            netflow_v5_listen,
         })
+    }
+}
+
+fn parse_optional_socket_addr(env_var: &str) -> Result<Option<SocketAddr>> {
+    match std::env::var(env_var) {
+        Ok(v) if v.is_empty() || v == "off" => Ok(None),
+        Ok(v) => v
+            .parse()
+            .map(Some)
+            .with_context(|| format!("{env_var}={v} is not a valid socket address")),
+        Err(_) => Ok(None),
     }
 }
