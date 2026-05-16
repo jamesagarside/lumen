@@ -11,7 +11,7 @@ const formatBytes = (n: number): string => {
 
 const FlowTable: Component<{ flows: Flow[] }> = (props) => {
   return (
-    <div class="overflow-auto h-full">
+    <div class="w-full">
       <table class="w-full text-xs font-mono">
         <thead class="sticky top-0 bg-zinc-900/95 backdrop-blur text-zinc-400 text-left">
           <tr>

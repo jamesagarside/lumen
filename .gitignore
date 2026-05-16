@@ -37,3 +37,5 @@ logs/
 
 # Claude / agent scratch
 .claude/
+.playwright-mcp/
+lumen-graph-001.png

@@ -1,7 +1,7 @@
 import { createResource, onCleanup, onMount, Show, type Component } from "solid-js";
 import DaemonBanner from "./DaemonBanner";
-import FlowGraph from "./FlowGraph";
 import FlowTable from "./FlowTable";
+import SigmaGraph from "./SigmaGraph";
 import { createFlowStore } from "./flowStore";
 import { createSnapshotStore } from "./snapshotStore";
 import type { VersionInfo } from "./types";
@@ -44,7 +44,7 @@ const App: Component = () => {
   };
 
   return (
-    <main class="min-h-screen bg-zinc-950 text-zinc-100 font-mono flex flex-col">
+    <main class="h-screen bg-zinc-950 text-zinc-100 font-mono flex flex-col overflow-hidden">
       <DaemonBanner
         unreachable={snapshotStore.unreachable()}
         wsState={flowStore.connection()}
@@ -73,12 +73,12 @@ const App: Component = () => {
         </div>
       </header>
 
-      <div class="flex-1 grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-px bg-zinc-800 overflow-hidden">
-        <section class="bg-zinc-950 p-4 overflow-hidden">
-          <FlowGraph snapshot={snapshotStore.snapshot()} />
+      <div class="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-px bg-zinc-800">
+        <section class="bg-zinc-950 min-h-0 overflow-hidden">
+          <SigmaGraph snapshot={snapshotStore.snapshot()} />
         </section>
-        <section class="bg-zinc-950 overflow-hidden flex flex-col">
-          <div class="px-3 py-1.5 border-b border-zinc-800/60 flex items-baseline justify-between">
+        <section class="bg-zinc-950 min-h-0 overflow-hidden flex flex-col">
+          <div class="px-3 py-1.5 border-b border-zinc-800/60 flex items-baseline justify-between flex-shrink-0">
             <span class="text-[10px] uppercase tracking-wider text-zinc-500">
               Recent flows
             </span>
@@ -86,7 +86,9 @@ const App: Component = () => {
               live tail · resets on refresh
             </span>
           </div>
-          <FlowTable flows={flowStore.flows()} />
+          <div class="flex-1 min-h-0 overflow-auto">
+            <FlowTable flows={flowStore.flows()} />
+          </div>
         </section>
       </div>
     </main>
