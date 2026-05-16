@@ -22,14 +22,20 @@ interface NodeMeta {
   isGateway: boolean;
 }
 
+interface Props {
+  snapshot: Snapshot | null;
+  onSelectionChange?: (id: string | null) => void;
+  selectedNodeId?: string | null;
+  /** Trigger a one-shot full re-layout (called when the user clicks Re-layout). */
+  relayoutSignal?: number;
+}
+
 const isGatewayLikeIp = (ip: string): boolean => {
-  // Heuristic: x.x.x.1 within an internal range. Plugins eventually
-  // override this with authoritative topology (#18).
   const parts = ip.split(".");
   return parts.length === 4 && parts[3] === "1";
 };
 
-const initialPosition = (
+const initialAnchor = (
   meta: NodeMeta,
   internalIndex: number,
   internalCount: number,
@@ -49,25 +55,15 @@ const initialPosition = (
   };
 };
 
-interface Props {
-  snapshot: Snapshot | null;
-  /** Called whenever the user selects (or deselects with null) a node. */
-  onSelectionChange?: (id: string | null) => void;
-  /** Selection driven from outside (e.g. inspector close button). */
-  selectedNodeId?: string | null;
-}
-
 const SigmaGraph: Component<Props> = (props) => {
   let container: HTMLDivElement | undefined;
   let sigma: Sigma | null = null;
   let graph: Graph | null = null;
 
-  // Hover and selection are mutated from Sigma event handlers.
-  // Refs (not signals) are fine because Sigma's reducer reads them
-  // synchronously via closure on every render and we trigger
-  // re-render via sigma.refresh().
   let hoveredNode: string | null = null;
   let selectedNode: string | null = null;
+  let draggedNode: string | null = null;
+  let dragSuppressClick = false;
 
   const focused = () => selectedNode || hoveredNode;
 
@@ -118,6 +114,11 @@ const SigmaGraph: Component<Props> = (props) => {
       sigma?.refresh();
     });
     sigma.on("clickNode", ({ node }) => {
+      if (dragSuppressClick) {
+        // A drag just ended on this node — don't toggle selection.
+        dragSuppressClick = false;
+        return;
+      }
       selectedNode = selectedNode === node ? null : node;
       props.onSelectionChange?.(selectedNode);
       sigma?.refresh();
@@ -129,6 +130,51 @@ const SigmaGraph: Component<Props> = (props) => {
         sigma?.refresh();
       }
     });
+
+    // ── drag-to-pin wiring ────────────────────────────────────────────────
+    // Sigma exposes mouse captor events. Standard pattern from their docs:
+    // downNode → start drag, mousemovebody → update position,
+    // mouseup → commit + PATCH.
+    sigma.on("downNode", ({ node }) => {
+      draggedNode = node;
+      if (sigma && graph) {
+        graph.setNodeAttribute(node, "highlighted", true);
+        sigma.getCamera().disable();
+      }
+    });
+
+    sigma.getMouseCaptor().on("mousemovebody", (e) => {
+      if (!draggedNode || !sigma || !graph) return;
+      const coords = sigma.viewportToGraph(e);
+      graph.setNodeAttribute(draggedNode, "x", coords.x);
+      graph.setNodeAttribute(draggedNode, "y", coords.y);
+      e.preventSigmaDefault();
+      e.original.preventDefault();
+      e.original.stopPropagation();
+    });
+
+    const finishDrag = () => {
+      if (!draggedNode || !graph || !sigma) return;
+      const x = graph.getNodeAttribute(draggedNode, "x") as number;
+      const y = graph.getNodeAttribute(draggedNode, "y") as number;
+      const id = draggedNode;
+      graph.removeNodeAttribute(id, "highlighted");
+      sigma.getCamera().enable();
+      draggedNode = null;
+      dragSuppressClick = true;
+      // Fire-and-forget; snapshot poll will pick up the persisted value.
+      void fetch(`/nodes/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ position: { x, y } }),
+      }).catch(() => {
+        // Surfaced via the snapshot store's error indicator if the
+        // server is also unreachable; otherwise it's a transient
+        // failure and the next drag will retry.
+      });
+    };
+    sigma.getMouseCaptor().on("mouseup", finishDrag);
+    sigma.getMouseCaptor().on("mouseleave", finishDrag);
   };
 
   onMount(() => ensureSigma());
@@ -143,8 +189,8 @@ const SigmaGraph: Component<Props> = (props) => {
   createEffect(() => {
     const snap = props.snapshot;
     if (!snap || !graph || !sigma) return;
-    const hadNewNodes = applySnapshot(graph, snap);
-    if (hadNewNodes) runIncrementalLayout(graph);
+    const newIds = applySnapshot(graph, snap);
+    if (newIds.size > 0) runIncrementalLayout(graph, newIds);
     sigma.refresh();
   });
 
@@ -158,6 +204,18 @@ const SigmaGraph: Component<Props> = (props) => {
     }
   });
 
+  // Manual full re-layout (escape hatch when the user wants a fresh
+  // organic arrangement). Triggered by the "Re-layout" button which
+  // increments a counter prop.
+  createEffect(() => {
+    const tick = props.relayoutSignal;
+    if (tick === undefined || tick === 0 || !graph || !sigma) return;
+    runFullLayout(graph);
+    sigma.refresh();
+    // Persist the new positions for every node so the re-layout sticks.
+    persistAllPositions(graph);
+  });
+
   return (
     <div class="relative w-full h-full">
       <div ref={container} class="absolute inset-0" style={{ background: "rgb(9 9 11)" }} />
@@ -168,20 +226,20 @@ const SigmaGraph: Component<Props> = (props) => {
 
 const Hint: Component = () => (
   <div class="absolute bottom-3 left-3 text-[9px] text-zinc-700 font-mono pointer-events-none select-none">
-    drag to pan · scroll to zoom · hover or click a node
+    drag a node to pin · scroll to zoom · click to inspect
   </div>
 );
 
 /**
- * Reconcile the Sigma graph against the latest snapshot. Returns
- * true if any new nodes were added — caller uses this to decide
- * whether a layout run is needed (no-op when topology is stable).
+ * Reconcile the Sigma graph against the latest snapshot. Returns the
+ * set of node IDs that were *added* in this call — caller uses this
+ * to constrain the layout pass (only new nodes get force-layout
+ * applied; existing positions are preserved to avoid jitter).
  */
-function applySnapshot(graph: Graph, snap: Snapshot): boolean {
+function applySnapshot(graph: Graph, snap: Snapshot): Set<string> {
   const incomingNodes = new Set(snap.nodes.map((n) => n.id));
   const incomingEdges = new Set(snap.edges.map((e) => `${e.id.src}->${e.id.dst}`));
 
-  // Drop entities that disappeared from the topology.
   for (const id of [...graph.nodes()]) {
     if (!incomingNodes.has(id)) graph.dropNode(id);
   }
@@ -189,7 +247,6 @@ function applySnapshot(graph: Graph, snap: Snapshot): boolean {
     if (!incomingEdges.has(key)) graph.dropEdge(key);
   }
 
-  // Pre-compute per-ring indices for new nodes so anchors fan out evenly.
   const newInternal = snap.nodes.filter((n) => n.is_internal && !graph.hasNode(n.id));
   const newExternal = snap.nodes.filter((n) => !n.is_internal && !graph.hasNode(n.id));
   const internalCount = snap.nodes.filter((n) => n.is_internal).length;
@@ -197,7 +254,7 @@ function applySnapshot(graph: Graph, snap: Snapshot): boolean {
 
   let internalIdx = countWith(graph, (a) => a.internal === true);
   let externalIdx = countWith(graph, (a) => a.internal === false);
-  const hadNewNodes = newInternal.length > 0 || newExternal.length > 0;
+  const newIds = new Set<string>();
 
   for (const node of [...newInternal, ...newExternal]) {
     const meta: NodeMeta = {
@@ -205,7 +262,9 @@ function applySnapshot(graph: Graph, snap: Snapshot): boolean {
       internal: node.is_internal,
       isGateway: node.is_internal && isGatewayLikeIp(node.id),
     };
-    const pos = initialPosition(
+    // Persisted position wins. Otherwise fall back to the semantic
+    // anchor based on internal/external ring index.
+    const pos = node.position ?? initialAnchor(
       meta,
       meta.internal ? internalIdx++ : 0,
       internalCount,
@@ -226,11 +285,12 @@ function applySnapshot(graph: Graph, snap: Snapshot): boolean {
       internal: meta.internal,
       isGateway: meta.isGateway,
     });
+    newIds.add(node.id);
   }
 
   // Existing nodes: refresh label in case it was renamed via PATCH.
   for (const n of snap.nodes) {
-    if (graph.hasNode(n.id)) {
+    if (graph.hasNode(n.id) && !newIds.has(n.id)) {
       const want = n.label || n.id;
       if (graph.getNodeAttribute(n.id, "label") !== want) {
         graph.setNodeAttribute(n.id, "label", want);
@@ -239,9 +299,7 @@ function applySnapshot(graph: Graph, snap: Snapshot): boolean {
   }
 
   // Edges: add new ones, update sizes/colors for existing. Intensity
-  // scales by sqrt so a 10× bandwidth difference shows as ~3× stroke
-  // — keeps the high-traffic edges legible without making the
-  // low-traffic ones invisible.
+  // scales by sqrt so a 10× bandwidth difference shows as ~3× stroke.
   const maxRate = Math.max(1, ...snap.edges.map((e) => e.bytes_per_sec));
   for (const e of snap.edges) {
     const key = `${e.id.src}->${e.id.dst}`;
@@ -261,7 +319,7 @@ function applySnapshot(graph: Graph, snap: Snapshot): boolean {
       });
     }
   }
-  return hadNewNodes;
+  return newIds;
 }
 
 function countWith(graph: Graph, pred: (a: { internal?: boolean }) => boolean): number {
@@ -273,18 +331,22 @@ function countWith(graph: Graph, pred: (a: { internal?: boolean }) => boolean): 
 }
 
 /**
- * Settle the layout. Tuning notes:
- *  - lower `gravity` + higher `scalingRatio` spread nodes apart so
- *    the graph doesn't collapse into a hairball at scale;
- *  - `edgeWeightInfluence: 0` keeps high-bandwidth edges from yanking
- *    their endpoints together (rate is shown via stroke, not position);
- *  - `linLogMode` separates clusters more cleanly than linear mode
- *    when there are many edges per node.
- * Cheap (~1ms for a few hundred nodes); we re-run on every snapshot
- * that introduces new nodes so the topology breathes naturally.
+ * Force-atlas settle pass that respects existing positions: snapshot
+ * the (x, y) of every non-new node, run the layout, restore. Only
+ * the new nodes' positions move. Side effect: layout has to ripple
+ * across the whole graph to settle the new nodes against their
+ * neighbours, but that work is wasted for existing positions — we
+ * throw it away. Cheap enough at A-tier scale (<1ms for ~50 nodes).
  */
-function runIncrementalLayout(graph: Graph) {
+function runIncrementalLayout(graph: Graph, newIds: Set<string>) {
   if (graph.order < 2) return;
+  const saved = new Map<string, { x: number; y: number }>();
+  graph.forEachNode((id, attrs) => {
+    if (!newIds.has(id)) {
+      saved.set(id, { x: attrs.x as number, y: attrs.y as number });
+    }
+  });
+
   forceAtlas2.assign(graph, {
     iterations: 80,
     settings: {
@@ -298,6 +360,51 @@ function runIncrementalLayout(graph: Graph) {
       linLogMode: true,
       outboundAttractionDistribution: false,
     },
+  });
+
+  for (const [id, pos] of saved) {
+    graph.setNodeAttribute(id, "x", pos.x);
+    graph.setNodeAttribute(id, "y", pos.y);
+  }
+}
+
+/**
+ * Full unconstrained layout — called by the "Re-layout" button.
+ * Moves every node, ignores anchors. The user explicitly asked
+ * for a fresh organic arrangement.
+ */
+function runFullLayout(graph: Graph) {
+  if (graph.order < 2) return;
+  forceAtlas2.assign(graph, {
+    iterations: 200,
+    settings: {
+      gravity: 0.3,
+      scalingRatio: 30,
+      strongGravityMode: false,
+      slowDown: 2,
+      barnesHutOptimize: graph.order > 100,
+      adjustSizes: true,
+      edgeWeightInfluence: 0,
+      linLogMode: true,
+      outboundAttractionDistribution: false,
+    },
+  });
+}
+
+/**
+ * After a full re-layout, persist every position so the new
+ * arrangement survives reload + restart. Fire-and-forget per node;
+ * each failure is logged (server side) and ignored client side.
+ */
+function persistAllPositions(graph: Graph) {
+  graph.forEachNode((id, attrs) => {
+    const x = attrs.x as number;
+    const y = attrs.y as number;
+    void fetch(`/nodes/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ position: { x, y } }),
+    }).catch(() => {});
   });
 }
 

@@ -33,12 +33,18 @@ export interface VersionInfo {
 // { secs_since_epoch, nanos_since_epoch }.
 type SystemTimeJson = { secs_since_epoch: number; nanos_since_epoch: number };
 
+export interface Position {
+  x: number;
+  y: number;
+}
+
 export interface Node {
   id: string; // serde-transparent NodeId(IpAddr) → IP string
   is_internal: boolean;
   first_seen: SystemTimeJson;
   last_seen: SystemTimeJson;
   label?: string;
+  position?: Position;
 }
 
 export interface EdgeId {

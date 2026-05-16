@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use lumen_core::{Node, NodeId, Snapshot};
+use lumen_core::{Node, NodeId, Position, Snapshot};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
@@ -44,10 +44,16 @@ pub async fn snapshot(State(state): State<AppState>) -> Json<Snapshot> {
     Json(state.engine.snapshot())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct NodePatch {
     /// New label; an empty string removes any persisted label.
-    pub label: String,
+    /// Omitted entirely if the caller only wants to update position.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// New position in Sigma graph coordinates. Both fields required
+    /// together. Omitted if the caller only wants to update label.
+    #[serde(default)]
+    pub position: Option<Position>,
 }
 
 #[derive(Serialize)]
@@ -55,10 +61,11 @@ pub struct ApiError {
     pub error: String,
 }
 
-/// Patch a node's user-supplied label. Persists via the topology
-/// store and updates the in-memory node. 404 if the node isn't
-/// currently known to the engine — labels for never-seen nodes are
-/// not useful and would just accumulate as orphans.
+/// Patch a node's user-editable fields. Any subset of {label,
+/// position} can be supplied; updates apply atomically per field
+/// against the topology store and the in-memory engine state.
+/// 404 if the node isn't currently known — labels and positions for
+/// never-seen nodes would just accumulate as orphans.
 pub async fn patch_node(
     Path(id): Path<String>,
     State(state): State<AppState>,
@@ -73,33 +80,76 @@ pub async fn patch_node(
         )
     })?;
     let node_id = NodeId(ip);
-    let trimmed = patch.label.trim();
-    if trimmed.len() > 128 {
+
+    if patch.label.is_none() && patch.position.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiError {
-                error: "label must be 128 characters or fewer".to_string(),
+                error: "request body must include at least one of label or position".to_string(),
             }),
         ));
     }
-    match state.engine.set_node_label(&node_id, trimmed) {
-        Ok(Some(node)) => Ok(Json(node)),
-        Ok(None) => Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: format!("node {ip} is not currently in the topology"),
-            }),
-        )),
-        Err(e) => {
-            warn!(error = %e, ip = %ip, "failed to set node label");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
+
+    let mut updated: Option<Node> = None;
+
+    if let Some(raw_label) = patch.label.as_deref() {
+        let trimmed = raw_label.trim();
+        if trimmed.len() > 128 {
+            return Err((
+                StatusCode::BAD_REQUEST,
                 Json(ApiError {
-                    error: "failed to persist label".to_string(),
+                    error: "label must be 128 characters or fewer".to_string(),
                 }),
-            ))
+            ));
+        }
+        match state.engine.set_node_label(&node_id, trimmed) {
+            Ok(Some(node)) => updated = Some(node),
+            Ok(None) => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: format!("node {ip} is not currently in the topology"),
+                    }),
+                ));
+            }
+            Err(e) => {
+                warn!(error = %e, ip = %ip, "failed to set node label");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "failed to persist label".to_string(),
+                    }),
+                ));
+            }
         }
     }
+
+    if let Some(position) = patch.position {
+        match state.engine.set_node_position(&node_id, position) {
+            Ok(Some(node)) => updated = Some(node),
+            Ok(None) => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: format!("node {ip} is not currently in the topology"),
+                    }),
+                ));
+            }
+            Err(e) => {
+                warn!(error = %e, ip = %ip, "failed to set node position");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "failed to persist position".to_string(),
+                    }),
+                ));
+            }
+        }
+    }
+
+    // updated is always Some at this point — either label or position
+    // succeeded, both checks return early otherwise.
+    Ok(Json(updated.expect("at least one field updated")))
 }
 
 /// Live flow stream over WebSocket. Each message is a JSON-encoded

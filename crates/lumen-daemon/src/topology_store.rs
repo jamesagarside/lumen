@@ -13,11 +13,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use lumen_core::NodeId;
+use lumen_core::{NodeId, Position};
 use redb::{Database, ReadableTable, TableDefinition};
 
 /// `node_labels`: NodeId-as-string → user-supplied display label.
 const NODE_LABELS: TableDefinition<&str, &str> = TableDefinition::new("node_labels");
+
+/// `node_positions`: NodeId-as-string → packed (x: f32, y: f32). Two
+/// little-endian f32s (8 bytes total). Keeping it raw bytes rather
+/// than a serialised struct is a small win in storage and avoids an
+/// encoding dep we don't otherwise need here.
+const NODE_POSITIONS: TableDefinition<&str, [u8; 8]> = TableDefinition::new("node_positions");
 
 #[derive(Clone)]
 pub struct TopologyStore {
@@ -40,6 +46,8 @@ impl TopologyStore {
         {
             txn.open_table(NODE_LABELS)
                 .context("opening node_labels table")?;
+            txn.open_table(NODE_POSITIONS)
+                .context("opening node_positions table")?;
         }
         txn.commit().context("committing table init")?;
 
@@ -88,6 +96,43 @@ impl TopologyStore {
             .ok()
             .flatten()
             .map(|v| v.value().to_string())
+    }
+
+    pub fn set_node_position(&self, id: &NodeId, pos: Position) -> Result<()> {
+        let mut buf = [0u8; 8];
+        buf[0..4].copy_from_slice(&pos.x.to_le_bytes());
+        buf[4..8].copy_from_slice(&pos.y.to_le_bytes());
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(NODE_POSITIONS)?;
+            let key = id.0.to_string();
+            table.insert(key.as_str(), &buf)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Fast single-key lookup, mirrors `lookup_label`.
+    pub fn lookup_position(&self, id: &NodeId) -> Option<Position> {
+        let txn = match self.db.begin_read() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "topology store read failed");
+                return None;
+            }
+        };
+        let table = match txn.open_table(NODE_POSITIONS) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "node_positions table missing");
+                return None;
+            }
+        };
+        let key = id.0.to_string();
+        let bytes = table.get(key.as_str()).ok().flatten().map(|v| v.value())?;
+        let x = f32::from_le_bytes(bytes[0..4].try_into().ok()?);
+        let y = f32::from_le_bytes(bytes[4..8].try_into().ok()?);
+        Some(Position { x, y })
     }
 
     /// Bulk-list everything currently labelled. Used by tests and by
@@ -165,5 +210,42 @@ mod tests {
         store.set_node_label(&id("10.0.0.1"), "gateway").unwrap();
         let labels = store.list_node_labels().unwrap();
         assert_eq!(labels, vec![(id("10.0.0.1"), "gateway".to_string())]);
+    }
+
+    #[test]
+    fn position_round_trips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("topology.redb");
+        let store = TopologyStore::open(&path).unwrap();
+        store
+            .set_node_position(&id("10.0.0.1"), Position { x: 0.42, y: -0.91 })
+            .unwrap();
+        let pos = store.lookup_position(&id("10.0.0.1")).unwrap();
+        assert!((pos.x - 0.42).abs() < 1e-6);
+        assert!((pos.y + 0.91).abs() < 1e-6);
+    }
+
+    #[test]
+    fn position_survives_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("topology.redb");
+        {
+            let store = TopologyStore::open(&path).unwrap();
+            store
+                .set_node_position(&id("10.0.0.1"), Position { x: 1.5, y: 2.5 })
+                .unwrap();
+        }
+        let store = TopologyStore::open(&path).unwrap();
+        let pos = store.lookup_position(&id("10.0.0.1")).unwrap();
+        assert!((pos.x - 1.5).abs() < 1e-6);
+        assert!((pos.y - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lookup_position_missing_returns_none() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("topology.redb");
+        let store = TopologyStore::open(&path).unwrap();
+        assert!(store.lookup_position(&id("10.0.0.99")).is_none());
     }
 }

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
-use lumen_core::{is_internal_ip, Delta, Edge, EdgeId, Flow, Node, NodeId, Snapshot};
+use lumen_core::{is_internal_ip, Delta, Edge, EdgeId, Flow, Node, NodeId, Position, Snapshot};
 use tokio::sync::broadcast;
 
 use crate::topology_store::TopologyStore;
@@ -84,6 +84,23 @@ impl LiveStateEngine {
         }))
     }
 
+    /// Persist a user-dragged position for `id` and apply it to the
+    /// in-memory node (if present).
+    pub fn set_node_position(
+        &self,
+        id: &NodeId,
+        position: Position,
+    ) -> anyhow::Result<Option<Node>> {
+        if let Some(store) = &self.topology_store {
+            store.set_node_position(id, position)?;
+        }
+        let mut state = self.inner.write().expect("engine state poisoned");
+        Ok(state.nodes.get_mut(id).map(|n| {
+            n.position = Some(position);
+            n.clone()
+        }))
+    }
+
     /// Used by the wire protocol (#8) to push per-flow deltas to web
     /// clients without waiting for a snapshot tick.
     #[allow(dead_code)]
@@ -111,16 +128,17 @@ impl LiveStateEngine {
                 use std::collections::btree_map::Entry;
                 match entry {
                     Entry::Vacant(v) => {
-                        let label = self
-                            .topology_store
-                            .as_ref()
-                            .and_then(|s| s.lookup_label(&id));
+                        let (label, position) =
+                            self.topology_store.as_ref().map_or((None, None), |s| {
+                                (s.lookup_label(&id), s.lookup_position(&id))
+                            });
                         let node = Node {
                             id: id.clone(),
                             is_internal: is_internal_ip(ip),
                             first_seen: now,
                             last_seen: now,
                             label,
+                            position,
                         };
                         v.insert(node.clone());
                         emitted.push(Delta::NodeAdded(node));

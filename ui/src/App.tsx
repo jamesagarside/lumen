@@ -29,6 +29,7 @@ const App: Component = () => {
   const flowStore = createFlowStore(wsUrl());
   const snapshotStore = createSnapshotStore();
   const [selectedNode, setSelectedNode] = createSignal<string | null>(null);
+  const [relayoutTick, setRelayoutTick] = createSignal(0);
 
   onMount(() => {
     flowStore.connect();
@@ -71,6 +72,14 @@ const App: Component = () => {
             )}
           </Show>
           <TopologyStat snapshot={snapshotStore.snapshot()} totalBps={totalBytesPerSec()} />
+          <button
+            type="button"
+            class="text-[10px] uppercase tracking-wider text-zinc-500 hover:text-zinc-300 px-2 py-1 border border-zinc-800 rounded hover:border-zinc-700"
+            title="re-run layout on every node from scratch"
+            onClick={() => setRelayoutTick((n) => n + 1)}
+          >
+            Re-layout
+          </button>
           <ConnectionPill state={flowStore.connection()} />
         </div>
       </header>
@@ -81,6 +90,7 @@ const App: Component = () => {
             snapshot={snapshotStore.snapshot()}
             selectedNodeId={selectedNode()}
             onSelectionChange={setSelectedNode}
+            relayoutSignal={relayoutTick()}
           />
         </section>
         <section class="bg-zinc-950 min-h-0 overflow-hidden flex flex-col">

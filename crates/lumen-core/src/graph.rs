@@ -24,6 +24,14 @@ impl From<IpAddr> for NodeId {
     }
 }
 
+/// User-supplied or layout-computed 2D coordinate. In Sigma's
+/// normalised graph space (~ -1.0 to 1.0 with some overflow).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Position {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// One observed network interface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -39,6 +47,11 @@ pub struct Node {
     /// `None` distinguishes "not labelled" from `Some("")`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Persisted position from the topology store, if any. Empty for
+    /// freshly-observed nodes; populated once the user drags them or
+    /// an integration provides authoritative placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<Position>,
 }
 
 /// Identity of an edge: directed `(src, dst)` pair. Two edges between
@@ -189,6 +202,7 @@ mod tests {
             first_seen: UNIX_EPOCH,
             last_seen: UNIX_EPOCH,
             label: None,
+            position: None,
         }
     }
 
