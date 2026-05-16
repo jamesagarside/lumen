@@ -1,9 +1,12 @@
+use std::net::IpAddr;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use lumen_core::Snapshot;
-use serde::Serialize;
+use lumen_core::{Node, NodeId, Snapshot};
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
 
@@ -39,6 +42,64 @@ pub async fn version() -> Json<VersionInfo> {
 /// snapshot+delta WebSocket in #8.
 pub async fn snapshot(State(state): State<AppState>) -> Json<Snapshot> {
     Json(state.engine.snapshot())
+}
+
+#[derive(Deserialize)]
+pub struct NodePatch {
+    /// New label; an empty string removes any persisted label.
+    pub label: String,
+}
+
+#[derive(Serialize)]
+pub struct ApiError {
+    pub error: String,
+}
+
+/// Patch a node's user-supplied label. Persists via the topology
+/// store and updates the in-memory node. 404 if the node isn't
+/// currently known to the engine — labels for never-seen nodes are
+/// not useful and would just accumulate as orphans.
+pub async fn patch_node(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(patch): Json<NodePatch>,
+) -> Result<Json<Node>, (StatusCode, Json<ApiError>)> {
+    let ip: IpAddr = id.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: format!("'{id}' is not a valid IP address"),
+            }),
+        )
+    })?;
+    let node_id = NodeId(ip);
+    let trimmed = patch.label.trim();
+    if trimmed.len() > 128 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "label must be 128 characters or fewer".to_string(),
+            }),
+        ));
+    }
+    match state.engine.set_node_label(&node_id, trimmed) {
+        Ok(Some(node)) => Ok(Json(node)),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: format!("node {ip} is not currently in the topology"),
+            }),
+        )),
+        Err(e) => {
+            warn!(error = %e, ip = %ip, "failed to set node label");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "failed to persist label".to_string(),
+                }),
+            ))
+        }
+    }
 }
 
 /// Live flow stream over WebSocket. Each message is a JSON-encoded

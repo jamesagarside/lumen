@@ -1,6 +1,7 @@
-import { createResource, onCleanup, onMount, Show, type Component } from "solid-js";
+import { createResource, createSignal, onCleanup, onMount, Show, type Component } from "solid-js";
 import DaemonBanner from "./DaemonBanner";
 import FlowTable from "./FlowTable";
+import NodeInspector from "./NodeInspector";
 import SigmaGraph from "./SigmaGraph";
 import { createFlowStore } from "./flowStore";
 import { createSnapshotStore } from "./snapshotStore";
@@ -27,6 +28,7 @@ const App: Component = () => {
   const [version] = createResource(fetchVersion);
   const flowStore = createFlowStore(wsUrl());
   const snapshotStore = createSnapshotStore();
+  const [selectedNode, setSelectedNode] = createSignal<string | null>(null);
 
   onMount(() => {
     flowStore.connect();
@@ -75,20 +77,40 @@ const App: Component = () => {
 
       <div class="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-px bg-zinc-800">
         <section class="bg-zinc-950 min-h-0 overflow-hidden">
-          <SigmaGraph snapshot={snapshotStore.snapshot()} />
+          <SigmaGraph
+            snapshot={snapshotStore.snapshot()}
+            selectedNodeId={selectedNode()}
+            onSelectionChange={setSelectedNode}
+          />
         </section>
         <section class="bg-zinc-950 min-h-0 overflow-hidden flex flex-col">
-          <div class="px-3 py-1.5 border-b border-zinc-800/60 flex items-baseline justify-between flex-shrink-0">
-            <span class="text-[10px] uppercase tracking-wider text-zinc-500">
-              Recent flows
-            </span>
-            <span class="text-[9px] text-zinc-700">
-              live tail · resets on refresh
-            </span>
-          </div>
-          <div class="flex-1 min-h-0 overflow-auto">
-            <FlowTable flows={flowStore.flows()} />
-          </div>
+          <Show
+            when={selectedNode()}
+            fallback={
+              <div class="flex-1 min-h-0 flex flex-col">
+                <div class="px-3 py-1.5 border-b border-zinc-800/60 flex items-baseline justify-between flex-shrink-0">
+                  <span class="text-[10px] uppercase tracking-wider text-zinc-500">
+                    Recent flows
+                  </span>
+                  <span class="text-[9px] text-zinc-700">
+                    live tail · resets on refresh
+                  </span>
+                </div>
+                <div class="flex-1 min-h-0 overflow-auto">
+                  <FlowTable flows={flowStore.flows()} />
+                </div>
+              </div>
+            }
+          >
+            <NodeInspector
+              snapshot={snapshotStore.snapshot()}
+              selectedId={selectedNode()}
+              onClose={() => setSelectedNode(null)}
+              onLabelSaved={() => {
+                // Snapshot poll picks up the new label on the next tick.
+              }}
+            />
+          </Show>
         </section>
       </div>
     </main>

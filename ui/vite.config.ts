@@ -14,6 +14,7 @@ export default defineConfig({
       "/healthz": "http://localhost:3000",
       "/version": "http://localhost:3000",
       "/snapshot": "http://localhost:3000",
+      "/nodes": "http://localhost:3000",
       "/ingest": "http://localhost:3000",
       "/ws/flows": {
         target: "ws://localhost:3000",

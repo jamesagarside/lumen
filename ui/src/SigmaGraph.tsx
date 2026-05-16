@@ -1,4 +1,4 @@
-import { onCleanup, onMount, createEffect, createSignal, type Component } from "solid-js";
+import { onCleanup, onMount, createEffect, type Component } from "solid-js";
 import Graph from "graphology";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import Sigma from "sigma";
@@ -49,7 +49,15 @@ const initialPosition = (
   };
 };
 
-const SigmaGraph: Component<{ snapshot: Snapshot | null }> = (props) => {
+interface Props {
+  snapshot: Snapshot | null;
+  /** Called whenever the user selects (or deselects with null) a node. */
+  onSelectionChange?: (id: string | null) => void;
+  /** Selection driven from outside (e.g. inspector close button). */
+  selectedNodeId?: string | null;
+}
+
+const SigmaGraph: Component<Props> = (props) => {
   let container: HTMLDivElement | undefined;
   let sigma: Sigma | null = null;
   let graph: Graph | null = null;
@@ -60,7 +68,6 @@ const SigmaGraph: Component<{ snapshot: Snapshot | null }> = (props) => {
   // re-render via sigma.refresh().
   let hoveredNode: string | null = null;
   let selectedNode: string | null = null;
-  const [, setSelectionTick] = createSignal(0); // forces App-side reactivity if needed later
 
   const focused = () => selectedNode || hoveredNode;
 
@@ -112,13 +119,15 @@ const SigmaGraph: Component<{ snapshot: Snapshot | null }> = (props) => {
     });
     sigma.on("clickNode", ({ node }) => {
       selectedNode = selectedNode === node ? null : node;
-      setSelectionTick((n) => n + 1);
+      props.onSelectionChange?.(selectedNode);
       sigma?.refresh();
     });
     sigma.on("clickStage", () => {
-      selectedNode = null;
-      setSelectionTick((n) => n + 1);
-      sigma?.refresh();
+      if (selectedNode !== null) {
+        selectedNode = null;
+        props.onSelectionChange?.(null);
+        sigma?.refresh();
+      }
     });
   };
 
@@ -137,6 +146,16 @@ const SigmaGraph: Component<{ snapshot: Snapshot | null }> = (props) => {
     const hadNewNodes = applySnapshot(graph, snap);
     if (hadNewNodes) runIncrementalLayout(graph);
     sigma.refresh();
+  });
+
+  // External "deselect" (inspector close button).
+  createEffect(() => {
+    const ext = props.selectedNodeId;
+    if (ext === undefined) return;
+    if (selectedNode !== ext) {
+      selectedNode = ext;
+      sigma?.refresh();
+    }
   });
 
   return (
@@ -203,10 +222,20 @@ function applySnapshot(graph: Graph, snap: Snapshot): boolean {
       y: pos.y,
       size: meta.isGateway ? 9 : meta.internal ? 6 : 4,
       color: baseColor,
-      label: node.id,
+      label: node.label || node.id,
       internal: meta.internal,
       isGateway: meta.isGateway,
     });
+  }
+
+  // Existing nodes: refresh label in case it was renamed via PATCH.
+  for (const n of snap.nodes) {
+    if (graph.hasNode(n.id)) {
+      const want = n.label || n.id;
+      if (graph.getNodeAttribute(n.id, "label") !== want) {
+        graph.setNodeAttribute(n.id, "label", want);
+      }
+    }
   }
 
   // Edges: add new ones, update sizes/colors for existing. Intensity

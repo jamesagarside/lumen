@@ -34,6 +34,11 @@ pub struct Node {
     pub is_internal: bool,
     pub first_seen: SystemTime,
     pub last_seen: SystemTime,
+    /// User-supplied display label. Merged in from the topology
+    /// store when present; falls back to the IP for display.
+    /// `None` distinguishes "not labelled" from `Some("")`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Identity of an edge: directed `(src, dst)` pair. Two edges between
@@ -183,6 +188,7 @@ mod tests {
             is_internal: internal,
             first_seen: UNIX_EPOCH,
             last_seen: UNIX_EPOCH,
+            label: None,
         }
     }
 

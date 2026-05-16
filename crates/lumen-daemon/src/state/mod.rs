@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime};
 use lumen_core::{is_internal_ip, Delta, Edge, EdgeId, Flow, Node, NodeId, Snapshot};
 use tokio::sync::broadcast;
 
+use crate::topology_store::TopologyStore;
 use rate::RateMeter;
 
 const DELTA_CHANNEL_CAPACITY: usize = 1024;
@@ -29,6 +30,7 @@ pub struct LiveStateEngine {
     inner: Arc<RwLock<EngineState>>,
     delta_tx: broadcast::Sender<Delta>,
     rate_half_life: Duration,
+    topology_store: Option<TopologyStore>,
 }
 
 struct EngineState {
@@ -46,6 +48,10 @@ struct EdgeRecord {
 
 impl LiveStateEngine {
     pub fn new() -> Self {
+        Self::with_store(None)
+    }
+
+    pub fn with_store(topology_store: Option<TopologyStore>) -> Self {
         let (delta_tx, _) = broadcast::channel(DELTA_CHANNEL_CAPACITY);
         Self {
             inner: Arc::new(RwLock::new(EngineState {
@@ -54,7 +60,28 @@ impl LiveStateEngine {
             })),
             delta_tx,
             rate_half_life: DEFAULT_RATE_HALF_LIFE,
+            topology_store,
         }
+    }
+
+    /// Persist a user-supplied label for `id` and apply it to the
+    /// in-memory node (if present). Returns the updated `Node` for
+    /// the caller (HTTP handler) to send back as the response. An
+    /// empty `label` removes the persisted entry.
+    pub fn set_node_label(&self, id: &NodeId, label: &str) -> anyhow::Result<Option<Node>> {
+        if let Some(store) = &self.topology_store {
+            store.set_node_label(id, label)?;
+        }
+        let mut state = self.inner.write().expect("engine state poisoned");
+        let label_opt = if label.is_empty() {
+            None
+        } else {
+            Some(label.to_string())
+        };
+        Ok(state.nodes.get_mut(id).map(|n| {
+            n.label = label_opt.clone();
+            n.clone()
+        }))
     }
 
     /// Used by the wire protocol (#8) to push per-flow deltas to web
@@ -84,11 +111,16 @@ impl LiveStateEngine {
                 use std::collections::btree_map::Entry;
                 match entry {
                     Entry::Vacant(v) => {
+                        let label = self
+                            .topology_store
+                            .as_ref()
+                            .and_then(|s| s.lookup_label(&id));
                         let node = Node {
                             id: id.clone(),
                             is_internal: is_internal_ip(ip),
                             first_seen: now,
                             last_seen: now,
+                            label,
                         };
                         v.insert(node.clone());
                         emitted.push(Delta::NodeAdded(node));

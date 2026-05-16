@@ -38,6 +38,7 @@ export interface Node {
   is_internal: boolean;
   first_seen: SystemTimeJson;
   last_seen: SystemTimeJson;
+  label?: string;
 }
 
 export interface EdgeId {

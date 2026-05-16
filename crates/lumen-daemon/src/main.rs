@@ -1,5 +1,6 @@
 use anyhow::Context;
-use axum::{routing::get, Router};
+use axum::routing::{get, patch};
+use axum::Router;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::services::ServeDir;
@@ -9,12 +10,14 @@ use tracing::{error, info};
 use crate::ingest::{udp_listener, FlowBus};
 use crate::routes::AppState;
 use crate::state::LiveStateEngine;
+use crate::topology_store::TopologyStore;
 
 mod config;
 mod ingest;
 mod observability;
 mod routes;
 mod state;
+mod topology_store;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,7 +33,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let bus = FlowBus::new();
-    let engine = LiveStateEngine::new();
+    let topology_store = open_topology_store(&config)?;
+    let engine = LiveStateEngine::with_store(Some(topology_store));
     let state = AppState {
         bus: bus.clone(),
         engine: engine.clone(),
@@ -74,6 +78,7 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
         .route("/healthz", get(routes::healthz))
         .route("/version", get(routes::version))
         .route("/snapshot", get(routes::snapshot))
+        .route("/nodes/:id", patch(routes::patch_node))
         .route("/ws/flows", get(routes::ws_flows))
         .with_state(state);
 
@@ -82,6 +87,16 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
     }
 
     router.layer(TraceLayer::new_for_http())
+}
+
+fn open_topology_store(config: &config::Config) -> anyhow::Result<TopologyStore> {
+    std::fs::create_dir_all(&config.data_dir)
+        .with_context(|| format!("creating data dir {}", config.data_dir.display()))?;
+    let path = config.data_dir.join("topology.redb");
+    let store = TopologyStore::open(&path)
+        .with_context(|| format!("opening topology store at {}", path.display()))?;
+    info!(path = %path.display(), "topology store ready");
+    Ok(store)
 }
 
 fn spawn_engine_ingest(bus: FlowBus, engine: LiveStateEngine) {
@@ -159,6 +174,7 @@ mod tests {
             netflow_v5_listen: None,
             edge_max_age: std::time::Duration::from_secs(300),
             eviction_interval: std::time::Duration::from_secs(30),
+            data_dir: std::path::PathBuf::from("./data"),
         }
     }
 

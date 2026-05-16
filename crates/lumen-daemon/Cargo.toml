@@ -29,6 +29,9 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 
+redb = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
 thiserror = { workspace = true }
+tempfile = "3"

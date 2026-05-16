@@ -13,6 +13,8 @@ pub struct Config {
     pub edge_max_age: Duration,
     /// How often the eviction sweep runs.
     pub eviction_interval: Duration,
+    /// Persistent state (topology DB, future plugin permissions, etc.)
+    pub data_dir: PathBuf,
 }
 
 impl Config {
@@ -33,12 +35,17 @@ impl Config {
         let edge_max_age = parse_duration_secs("LUMEN_EDGE_MAX_AGE_SECS", 300)?;
         let eviction_interval = parse_duration_secs("LUMEN_EVICTION_INTERVAL_SECS", 30)?;
 
+        let data_dir = std::env::var("LUMEN_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./data"));
+
         Ok(Self {
             http_listen,
             ui_assets_dir,
             netflow_v5_listen,
             edge_max_age,
             eviction_interval,
+            data_dir,
         })
     }
 }

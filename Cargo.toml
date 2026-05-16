@@ -35,6 +35,9 @@ serde_json = "1"
 anyhow = "1"
 thiserror = "2"
 
+# Storage
+redb = "2"
+
 # Internal
 lumen-core = { path = "crates/lumen-core" }
 lumen-plugin-sdk = { path = "crates/lumen-plugin-sdk" }
