@@ -20,6 +20,7 @@ use lumen_core::{is_internal_ip, Delta, Edge, EdgeId, Flow, Node, NodeId, Positi
 use tokio::sync::broadcast;
 
 use crate::brand;
+use crate::metrics::{EVICTIONS, TOPOLOGY_EDGES, TOPOLOGY_NODES};
 use crate::topology_store::TopologyStore;
 use rate::RateMeter;
 
@@ -226,6 +227,8 @@ impl LiveStateEngine {
             record.rate.decay_to(now);
             record.edge.bytes_per_sec = record.rate.current();
         }
+        metrics::gauge!(TOPOLOGY_NODES).set(state.nodes.len() as f64);
+        metrics::gauge!(TOPOLOGY_EDGES).set(state.edges.len() as f64);
         Snapshot {
             generated_at: now,
             nodes: state.nodes.values().cloned().collect(),
@@ -278,6 +281,9 @@ impl LiveStateEngine {
 
         for d in deltas {
             let _ = self.delta_tx.send(d);
+        }
+        if emitted > 0 {
+            metrics::counter!(EVICTIONS).increment(emitted as u64);
         }
         emitted
     }

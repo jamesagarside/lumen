@@ -32,6 +32,9 @@ thiserror = { workspace = true }
 redb = { workspace = true }
 ipnet = { workspace = true }
 
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
 thiserror = { workspace = true }

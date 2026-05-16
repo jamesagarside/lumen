@@ -11,6 +11,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
 
 use crate::ingest::FlowBus;
+use crate::metrics::{self as app_metrics, WS_CLIENTS};
 use crate::state::LiveStateEngine;
 
 #[derive(Clone)]
@@ -28,6 +29,15 @@ pub struct VersionInfo {
 
 pub async fn healthz() -> &'static str {
     "ok"
+}
+
+/// Prometheus / OpenMetrics scrape endpoint. Returns the current
+/// recorder render — plain text in the Prometheus exposition format.
+pub async fn metrics() -> impl IntoResponse {
+    (
+        [("content-type", "text/plain; version=0.0.4")],
+        app_metrics::render(),
+    )
 }
 
 pub async fn version() -> Json<VersionInfo> {
@@ -159,8 +169,27 @@ pub async fn ws_flows(ws: WebSocketUpgrade, State(state): State<AppState>) -> im
     ws.on_upgrade(move |socket| handle_ws_flows(socket, state.bus))
 }
 
+/// RAII gauge: bumps `lumen_ws_clients` on construction, decrements
+/// on drop. Guarantees the gauge is balanced even if the WS handler
+/// panics or returns early.
+struct WsClientGauge;
+
+impl WsClientGauge {
+    fn new() -> Self {
+        metrics::gauge!(WS_CLIENTS).increment(1.0);
+        Self
+    }
+}
+
+impl Drop for WsClientGauge {
+    fn drop(&mut self) {
+        metrics::gauge!(WS_CLIENTS).decrement(1.0);
+    }
+}
+
 async fn handle_ws_flows(mut socket: WebSocket, bus: FlowBus) {
     let mut rx = bus.subscribe();
+    let _ws_client_guard = WsClientGauge::new();
     debug!("ws client connected");
 
     loop {

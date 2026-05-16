@@ -12,6 +12,7 @@ use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
 
 use super::FlowBus;
+use crate::metrics::FLOWS_INGESTED;
 
 const MAX_DATAGRAM_BYTES: usize = 65_535;
 
@@ -70,6 +71,8 @@ pub async fn run<P: DatagramParser>(
                     flows = flows.len(),
                     "datagram parsed"
                 );
+                metrics::counter!(FLOWS_INGESTED, "protocol" => parser.name())
+                    .increment(flows.len() as u64);
                 for flow in flows {
                     bus.publish(flow);
                 }

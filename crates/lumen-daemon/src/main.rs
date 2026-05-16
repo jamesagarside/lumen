@@ -15,6 +15,7 @@ use crate::topology_store::TopologyStore;
 mod brand;
 mod config;
 mod ingest;
+mod metrics;
 mod observability;
 mod routes;
 mod state;
@@ -23,6 +24,7 @@ mod topology_store;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     observability::init();
+    metrics::install()?;
 
     let config = config::Config::from_env()?;
 
@@ -78,6 +80,7 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(routes::healthz))
         .route("/version", get(routes::version))
+        .route("/metrics", get(routes::metrics))
         .route("/snapshot", get(routes::snapshot))
         .route("/nodes/:id", patch(routes::patch_node))
         .route("/ws/flows", get(routes::ws_flows))
