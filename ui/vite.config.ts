@@ -13,6 +13,11 @@ export default defineConfig({
     proxy: {
       "/healthz": "http://localhost:3000",
       "/version": "http://localhost:3000",
+      "/ws/flows": {
+        target: "ws://localhost:3000",
+        ws: true,
+        rewriteWsOrigin: true,
+      },
     },
   },
 });

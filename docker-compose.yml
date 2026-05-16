@@ -3,7 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/jamesagarside/lumen:dev
+    # Locally-built image. Not published to any registry yet — `docker
+    # compose up --build` will produce it from ./Dockerfile. Once CI
+    # publishes to GHCR, this becomes ghcr.io/jamesagarside/lumen:tag.
+    image: lumen:dev
+    pull_policy: never
     container_name: lumen
     restart: unless-stopped
     ports:

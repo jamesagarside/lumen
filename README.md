@@ -14,7 +14,18 @@ Lumen is an open-source network visualization tool that turns NetFlow, IPFIX, sy
 
 Lumen sits alongside your SIEM, not in place of it. It never persists raw flow records — only aggregated rollups and the topology you care about. Detections come from integrations (UniFi IPS, Suricata, etc.) via a typed plugin schema, surfaced as overlays on the graph.
 
-> **Status: Design phase.** This repo currently contains the locked design specification ([CONTEXT.md](./CONTEXT.md)). Implementation is being scoped into GitHub issues.
+> **Status: Early implementation.** Design spec at [CONTEXT.md](./CONTEXT.md); local dev guide at [DEVELOPMENT.md](./DEVELOPMENT.md). NetFlow v5 ingestion + a placeholder live UI are the first tracer through the data plane; the rest of v1 is being built incrementally.
+
+## Try it locally
+
+Two terminals:
+```bash
+make dev-daemon   # rust daemon on :3000 + UDP :2055
+make dev-ui       # vite UI dev server on :5173
+```
+Then `make demo` to send a synthetic NetFlow v5 packet, and open http://localhost:5173.
+
+Full guide: [DEVELOPMENT.md](./DEVELOPMENT.md).
 
 ## Why Lumen?
 
