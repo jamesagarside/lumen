@@ -12,6 +12,7 @@ use crate::routes::AppState;
 use crate::state::LiveStateEngine;
 use crate::topology_store::TopologyStore;
 
+mod brand;
 mod config;
 mod ingest;
 mod observability;

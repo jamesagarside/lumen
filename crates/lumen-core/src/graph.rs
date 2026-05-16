@@ -52,6 +52,12 @@ pub struct Node {
     /// an integration provides authoritative placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<Position>,
+    /// Recognised brand for external IPs ("Google", "Netflix",
+    /// "Cloudflare"…) derived from a bundled CIDR table. None for
+    /// internal IPs and for unrecognised externals. Display priority
+    /// in the UI: `label` > `brand` > `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brand: Option<String>,
 }
 
 /// Identity of an edge: directed `(src, dst)` pair. Two edges between
@@ -203,6 +209,7 @@ mod tests {
             last_seen: UNIX_EPOCH,
             label: None,
             position: None,
+            brand: None,
         }
     }
 

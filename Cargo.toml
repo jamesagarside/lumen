@@ -38,6 +38,9 @@ thiserror = "2"
 # Storage
 redb = "2"
 
+# Networking helpers
+ipnet = "2"
+
 # Internal
 lumen-core = { path = "crates/lumen-core" }
 lumen-plugin-sdk = { path = "crates/lumen-plugin-sdk" }

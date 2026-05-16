@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime};
 use lumen_core::{is_internal_ip, Delta, Edge, EdgeId, Flow, Node, NodeId, Position, Snapshot};
 use tokio::sync::broadcast;
 
+use crate::brand;
 use crate::topology_store::TopologyStore;
 use rate::RateMeter;
 
@@ -132,13 +133,22 @@ impl LiveStateEngine {
                             self.topology_store.as_ref().map_or((None, None), |s| {
                                 (s.lookup_label(&id), s.lookup_position(&id))
                             });
+                        let internal = is_internal_ip(ip);
+                        // Only classify externals — internal IPs by
+                        // definition don't have a meaningful brand.
+                        let brand = if internal {
+                            None
+                        } else {
+                            brand::classify(ip).map(|s| s.to_string())
+                        };
                         let node = Node {
                             id: id.clone(),
-                            is_internal: is_internal_ip(ip),
+                            is_internal: internal,
                             first_seen: now,
                             last_seen: now,
                             label,
                             position,
+                            brand,
                         };
                         v.insert(node.clone());
                         emitted.push(Delta::NodeAdded(node));

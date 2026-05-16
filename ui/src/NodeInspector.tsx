@@ -99,6 +99,17 @@ const NodeInspector: Component<Props> = (props) => {
               <div class="text-xs text-zinc-200">{n().id}</div>
             </div>
 
+            <Show when={n().brand}>
+              {(b) => (
+                <div>
+                  <div class="text-[9px] uppercase tracking-wider text-zinc-600">
+                    Brand
+                  </div>
+                  <div class="text-xs text-amber-300">{b()}</div>
+                </div>
+              )}
+            </Show>
+
             <div>
               <label class="text-[9px] uppercase tracking-wider text-zinc-600 block">
                 Label

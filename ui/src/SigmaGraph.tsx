@@ -2,6 +2,7 @@ import { onCleanup, onMount, createEffect, type Component } from "solid-js";
 import Graph from "graphology";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import Sigma from "sigma";
+import { displayName } from "./types";
 import type { Snapshot } from "./types";
 
 // Anchor positions for the semantic layout (CONTEXT.md §8):
@@ -81,6 +82,12 @@ const SigmaGraph: Component<Props> = (props) => {
       renderLabels: true,
       renderEdgeLabels: false,
       enableEdgeEvents: false,
+      // Sigma's default labelDensity (1) hides most labels at default
+      // zoom to avoid clutter. With recognisable brands as labels for
+      // externals + user labels for internals, we want them visible —
+      // bumping density shows roughly 3× as many before clutter wins.
+      labelDensity: 3,
+      labelGridCellSize: 60,
       minCameraRatio: 0.1,
       maxCameraRatio: 5,
       nodeReducer: (id, attrs) => {
@@ -281,17 +288,18 @@ function applySnapshot(graph: Graph, snap: Snapshot): Set<string> {
       y: pos.y,
       size: meta.isGateway ? 9 : meta.internal ? 6 : 4,
       color: baseColor,
-      label: node.label || node.id,
+      label: displayName(node),
       internal: meta.internal,
       isGateway: meta.isGateway,
     });
     newIds.add(node.id);
   }
 
-  // Existing nodes: refresh label in case it was renamed via PATCH.
+  // Existing nodes: refresh label in case it was renamed via PATCH
+  // or its brand classification was updated.
   for (const n of snap.nodes) {
     if (graph.hasNode(n.id) && !newIds.has(n.id)) {
-      const want = n.label || n.id;
+      const want = displayName(n);
       if (graph.getNodeAttribute(n.id, "label") !== want) {
         graph.setNodeAttribute(n.id, "label", want);
       }

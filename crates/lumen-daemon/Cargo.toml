@@ -30,6 +30,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 
 redb = { workspace = true }
+ipnet = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

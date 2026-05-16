@@ -45,7 +45,11 @@ export interface Node {
   last_seen: SystemTimeJson;
   label?: string;
   position?: Position;
+  brand?: string;
 }
+
+/** Display name precedence: user label > recognised brand > raw IP. */
+export const displayName = (n: Node): string => n.label || n.brand || n.id;
 
 export interface EdgeId {
   src: string;
