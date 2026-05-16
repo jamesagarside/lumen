@@ -1,7 +1,7 @@
 # Lumen — common dev commands.
 # See DEVELOPMENT.md for the full guide.
 
-.PHONY: help dev-daemon dev-ui demo install build test lint fmt fix \
+.PHONY: help dev dev-daemon dev-ui demo demo-stream install build test lint fmt fix \
         image up down logs clean
 
 UI_DIR := ui
@@ -9,12 +9,14 @@ UI_DIR := ui
 help:
 	@echo "Lumen dev commands:"
 	@echo ""
-	@echo "  Fast iteration (run in two terminals):"
-	@echo "    make dev-daemon       Run the Rust daemon on :3000 + UDP :2055"
-	@echo "    make dev-ui           Run the Vite UI dev server on :5173"
+	@echo "  Fast iteration:"
+	@echo "    make dev              Run daemon + UI together (Ctrl-C kills both)"
+	@echo "    make dev-daemon       Run just the daemon (terminal A)"
+	@echo "    make dev-ui           Run just the UI (terminal B)"
 	@echo ""
 	@echo "  Smoke test:"
-	@echo "    make demo             Send a synthetic NetFlow v5 packet"
+	@echo "    make demo             Send a single packet of synthetic flows"
+	@echo "    make demo-stream      Continuously stream realistic flows"
 	@echo ""
 	@echo "  Validate:"
 	@echo "    make test             cargo test + tsc --noEmit"
@@ -34,7 +36,11 @@ help:
 
 # ─── Fast iteration ──────────────────────────────────────────────────────────
 
-# Run in terminal A. Auto-reloads with cargo-watch if installed.
+# Run daemon + UI together with prefixed output. Ctrl-C kills both.
+dev:
+	@./scripts/dev.sh
+
+# Run in terminal A only. Auto-reloads with cargo-watch if installed.
 dev-daemon:
 	@if command -v cargo-watch >/dev/null 2>&1; then \
 		cargo watch -q -x 'run --bin lumen'; \
@@ -43,13 +49,17 @@ dev-daemon:
 		cargo run --bin lumen; \
 	fi
 
-# Run in terminal B.
+# Run in terminal B only.
 dev-ui:
 	cd $(UI_DIR) && npm run dev
 
-# Send a synthetic NetFlow v5 packet to the local daemon.
+# Send a single packet of varied synthetic flows.
 demo:
 	python3 scripts/send_netflow.py 2055
+
+# Stream continuously at ~5 packets/sec for realistic-looking traffic.
+demo-stream:
+	python3 scripts/send_netflow.py 2055 stream
 
 # ─── Validate ────────────────────────────────────────────────────────────────
 

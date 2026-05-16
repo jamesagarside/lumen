@@ -1,4 +1,5 @@
 import { createResource, onCleanup, onMount, Show, type Component } from "solid-js";
+import DaemonBanner from "./DaemonBanner";
 import FlowGraph from "./FlowGraph";
 import FlowTable from "./FlowTable";
 import { createFlowStore } from "./flowStore";
@@ -44,6 +45,10 @@ const App: Component = () => {
 
   return (
     <main class="min-h-screen bg-zinc-950 text-zinc-100 font-mono flex flex-col">
+      <DaemonBanner
+        unreachable={snapshotStore.unreachable()}
+        wsState={flowStore.connection()}
+      />
       <header class="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
         <div class="flex items-baseline gap-3">
           <h1 class="text-sm font-semibold tracking-tight">Lumen</h1>
@@ -56,7 +61,7 @@ const App: Component = () => {
           </Show>
         </div>
         <div class="flex items-center gap-4">
-          <Show when={snapshotStore.error()}>
+          <Show when={!snapshotStore.unreachable() ? snapshotStore.error() : null}>
             {(err) => (
               <span class="text-[10px] text-rose-400" title={err()}>
                 snapshot: {err()}
@@ -73,8 +78,13 @@ const App: Component = () => {
           <FlowGraph snapshot={snapshotStore.snapshot()} />
         </section>
         <section class="bg-zinc-950 overflow-hidden flex flex-col">
-          <div class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800/60">
-            Recent flows
+          <div class="px-3 py-1.5 border-b border-zinc-800/60 flex items-baseline justify-between">
+            <span class="text-[10px] uppercase tracking-wider text-zinc-500">
+              Recent flows
+            </span>
+            <span class="text-[9px] text-zinc-700">
+              live tail · resets on refresh
+            </span>
           </div>
           <FlowTable flows={flowStore.flows()} />
         </section>
