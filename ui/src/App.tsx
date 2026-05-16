@@ -56,6 +56,13 @@ const App: Component = () => {
           </Show>
         </div>
         <div class="flex items-center gap-4">
+          <Show when={snapshotStore.error()}>
+            {(err) => (
+              <span class="text-[10px] text-rose-400" title={err()}>
+                snapshot: {err()}
+              </span>
+            )}
+          </Show>
           <TopologyStat snapshot={snapshotStore.snapshot()} totalBps={totalBytesPerSec()} />
           <ConnectionPill state={flowStore.connection()} />
         </div>
