@@ -1,5 +1,5 @@
 import { createMemo, For, type Component } from "solid-js";
-import type { Flow } from "./types";
+import type { Snapshot } from "./types";
 
 interface NodePos {
   id: string;
@@ -8,55 +8,31 @@ interface NodePos {
   internal: boolean;
 }
 
-interface Edge {
+interface EdgeLine {
   from: NodePos;
   to: NodePos;
-  weight: number;
+  bytesPerSec: number;
 }
-
-const isPrivate = (ip: string): boolean => {
-  if (ip.startsWith("10.") || ip.startsWith("192.168.")) return true;
-  if (ip.startsWith("172.")) {
-    const second = parseInt(ip.split(".")[1] ?? "0", 10);
-    return second >= 16 && second <= 31;
-  }
-  if (ip.startsWith("127.") || ip === "::1") return true;
-  if (ip.startsWith("fe80:")) return true;
-  return false;
-};
 
 const VIEWBOX = { w: 800, h: 480 };
 
-const FlowGraph: Component<{ flows: Flow[] }> = (props) => {
+const FlowGraph: Component<{ snapshot: Snapshot | null }> = (props) => {
   const layout = createMemo(() => {
-    // Aggregate flows into edge weights per (src, dst) IP pair.
-    const edgeWeights = new Map<string, number>();
-    const ips = new Set<string>();
-    for (const f of props.flows) {
-      ips.add(f.src.ip);
-      ips.add(f.dst.ip);
-      const key = `${f.src.ip}|${f.dst.ip}`;
-      edgeWeights.set(key, (edgeWeights.get(key) ?? 0) + f.bytes);
+    const snap = props.snapshot;
+    if (!snap || snap.nodes.length === 0) {
+      return { nodes: [] as NodePos[], edges: [] as EdgeLine[], maxRate: 1 };
     }
 
-    // Internal nodes laid out in a centre cluster, external around the
-    // perimeter. This is a placeholder layout — the real semantic-anchor
-    // force-directed layout lands in #23.
-    const internal: string[] = [];
-    const external: string[] = [];
-    for (const ip of ips) {
-      (isPrivate(ip) ? internal : external).push(ip);
-    }
-    internal.sort();
-    external.sort();
+    const internal = snap.nodes.filter((n) => n.is_internal).map((n) => n.id);
+    const external = snap.nodes.filter((n) => !n.is_internal).map((n) => n.id);
 
-    const positions = new Map<string, NodePos>();
     const cx = VIEWBOX.w / 2;
     const cy = VIEWBOX.h / 2;
+    const positions = new Map<string, NodePos>();
 
     internal.forEach((ip, i) => {
       const angle = (i / Math.max(internal.length, 1)) * Math.PI * 2;
-      const r = internal.length === 1 ? 0 : 60;
+      const r = internal.length === 1 ? 0 : 70;
       positions.set(ip, {
         id: ip,
         x: cx + Math.cos(angle) * r,
@@ -66,8 +42,8 @@ const FlowGraph: Component<{ flows: Flow[] }> = (props) => {
     });
 
     external.forEach((ip, i) => {
-      const angle = (i / Math.max(external.length, 1)) * Math.PI * 2;
-      const r = Math.min(VIEWBOX.w, VIEWBOX.h) / 2 - 40;
+      const angle = (i / Math.max(external.length, 1)) * Math.PI * 2 - Math.PI / 2;
+      const r = Math.min(VIEWBOX.w, VIEWBOX.h) / 2 - 50;
       positions.set(ip, {
         id: ip,
         x: cx + Math.cos(angle) * r,
@@ -76,21 +52,17 @@ const FlowGraph: Component<{ flows: Flow[] }> = (props) => {
       });
     });
 
-    const edges: Edge[] = [];
-    for (const [key, weight] of edgeWeights) {
-      const [src, dst] = key.split("|");
-      const from = positions.get(src);
-      const to = positions.get(dst);
-      if (from && to) edges.push({ from, to, weight });
+    const edges: EdgeLine[] = [];
+    let maxRate = 1;
+    for (const e of snap.edges) {
+      const from = positions.get(e.id.src);
+      const to = positions.get(e.id.dst);
+      if (!from || !to) continue;
+      edges.push({ from, to, bytesPerSec: e.bytes_per_sec });
+      if (e.bytes_per_sec > maxRate) maxRate = e.bytes_per_sec;
     }
 
-    const maxWeight = Math.max(1, ...edges.map((e) => e.weight));
-
-    return {
-      nodes: [...positions.values()],
-      edges,
-      maxWeight,
-    };
+    return { nodes: [...positions.values()], edges, maxRate };
   });
 
   return (
@@ -100,16 +72,19 @@ const FlowGraph: Component<{ flows: Flow[] }> = (props) => {
       preserveAspectRatio="xMidYMid meet"
     >
       <For each={layout().edges}>
-        {(e) => (
-          <line
-            x1={e.from.x}
-            y1={e.from.y}
-            x2={e.to.x}
-            y2={e.to.y}
-            stroke="rgb(251 191 36 / 0.4)"
-            stroke-width={Math.max(0.5, (e.weight / layout().maxWeight) * 3)}
-          />
-        )}
+        {(e) => {
+          const intensity = Math.max(0.15, e.bytesPerSec / layout().maxRate);
+          return (
+            <line
+              x1={e.from.x}
+              y1={e.from.y}
+              x2={e.to.x}
+              y2={e.to.y}
+              stroke={`rgb(251 191 36 / ${intensity})`}
+              stroke-width={Math.max(0.5, intensity * 3)}
+            />
+          );
+        }}
       </For>
       <For each={layout().nodes}>
         {(n) => (
@@ -117,14 +92,14 @@ const FlowGraph: Component<{ flows: Flow[] }> = (props) => {
             <circle
               cx={n.x}
               cy={n.y}
-              r={n.internal ? 6 : 4}
+              r={n.internal ? 7 : 4}
               fill={n.internal ? "rgb(244 244 245)" : "rgb(113 113 122)"}
               stroke="rgb(24 24 27)"
               stroke-width="1.5"
             />
             <text
               x={n.x}
-              y={n.y - 10}
+              y={n.y - 12}
               text-anchor="middle"
               class="fill-zinc-500 text-[9px] font-mono"
             >

@@ -2,15 +2,18 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
+use lumen_core::Snapshot;
 use serde::Serialize;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
 
 use crate::ingest::FlowBus;
+use crate::state::LiveStateEngine;
 
 #[derive(Clone)]
 pub struct AppState {
     pub bus: FlowBus,
+    pub engine: LiveStateEngine,
 }
 
 #[derive(Serialize)]
@@ -30,6 +33,12 @@ pub async fn version() -> Json<VersionInfo> {
         version: env!("CARGO_PKG_VERSION"),
         abi_version: lumen_core::ABI_VERSION,
     })
+}
+
+/// Current topology snapshot. JSON for v1; replaced by binary
+/// snapshot+delta WebSocket in #8.
+pub async fn snapshot(State(state): State<AppState>) -> Json<Snapshot> {
+    Json(state.engine.snapshot())
 }
 
 /// Live flow stream over WebSocket. Each message is a JSON-encoded

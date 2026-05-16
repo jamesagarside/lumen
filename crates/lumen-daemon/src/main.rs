@@ -8,11 +8,13 @@ use tracing::{error, info};
 
 use crate::ingest::{udp_listener, FlowBus};
 use crate::routes::AppState;
+use crate::state::LiveStateEngine;
 
 mod config;
 mod ingest;
 mod observability;
 mod routes;
+mod state;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,7 +30,21 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let bus = FlowBus::new();
-    let state = AppState { bus: bus.clone() };
+    let engine = LiveStateEngine::new();
+    let state = AppState {
+        bus: bus.clone(),
+        engine: engine.clone(),
+    };
+
+    // Engine consumes flows from the bus and maintains the topology.
+    spawn_engine_ingest(bus.clone(), engine.clone());
+
+    // Periodic eviction of stale edges and orphaned nodes.
+    spawn_eviction(
+        engine.clone(),
+        config.edge_max_age,
+        config.eviction_interval,
+    );
 
     if let Some(addr) = config.netflow_v5_listen {
         let bus = bus.clone();
@@ -57,6 +73,7 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(routes::healthz))
         .route("/version", get(routes::version))
+        .route("/snapshot", get(routes::snapshot))
         .route("/ws/flows", get(routes::ws_flows))
         .with_state(state);
 
@@ -65,6 +82,43 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
     }
 
     router.layer(TraceLayer::new_for_http())
+}
+
+fn spawn_engine_ingest(bus: FlowBus, engine: LiveStateEngine) {
+    let mut rx = bus.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(flow) => engine.ingest(&flow),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(missed = n, "engine lagged on flow stream");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+fn spawn_eviction(
+    engine: LiveStateEngine,
+    max_age: std::time::Duration,
+    interval: std::time::Duration,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let dropped = engine.evict_stale(max_age);
+            if dropped > 0 {
+                tracing::info!(
+                    dropped,
+                    max_age_secs = max_age.as_secs(),
+                    "evicted stale entities"
+                );
+            }
+        }
+    });
 }
 
 async fn shutdown_signal() {
@@ -103,12 +157,15 @@ mod tests {
             http_listen: "127.0.0.1:0".parse().unwrap(),
             ui_assets_dir: None,
             netflow_v5_listen: None,
+            edge_max_age: std::time::Duration::from_secs(300),
+            eviction_interval: std::time::Duration::from_secs(30),
         }
     }
 
     fn test_state() -> AppState {
         AppState {
             bus: FlowBus::new(),
+            engine: LiveStateEngine::new(),
         }
     }
 

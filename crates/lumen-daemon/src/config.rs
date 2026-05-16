@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -8,6 +9,10 @@ pub struct Config {
     pub http_listen: SocketAddr,
     pub ui_assets_dir: Option<PathBuf>,
     pub netflow_v5_listen: Option<SocketAddr>,
+    /// How long an edge can go without traffic before being evicted.
+    pub edge_max_age: Duration,
+    /// How often the eviction sweep runs.
+    pub eviction_interval: Duration,
 }
 
 impl Config {
@@ -25,11 +30,28 @@ impl Config {
         let netflow_v5_listen = parse_optional_socket_addr("LUMEN_NETFLOW_V5_LISTEN")?
             .or_else(|| Some("0.0.0.0:2055".parse().unwrap()));
 
+        let edge_max_age = parse_duration_secs("LUMEN_EDGE_MAX_AGE_SECS", 300)?;
+        let eviction_interval = parse_duration_secs("LUMEN_EVICTION_INTERVAL_SECS", 30)?;
+
         Ok(Self {
             http_listen,
             ui_assets_dir,
             netflow_v5_listen,
+            edge_max_age,
+            eviction_interval,
         })
+    }
+}
+
+fn parse_duration_secs(env_var: &str, default_secs: u64) -> Result<Duration> {
+    match std::env::var(env_var) {
+        Ok(v) => {
+            let secs: u64 = v.parse().with_context(|| {
+                format!("{env_var}={v} is not a non-negative integer (seconds)")
+            })?;
+            Ok(Duration::from_secs(secs))
+        }
+        Err(_) => Ok(Duration::from_secs(default_secs)),
     }
 }
 

@@ -7,7 +7,9 @@
 #![forbid(unsafe_code)]
 
 pub mod flow;
+pub mod graph;
 
 pub use flow::{Flow, FlowEndpoint, FlowSource, Protocol};
+pub use graph::{is_internal_ip, Delta, Edge, EdgeId, Node, NodeId, Snapshot};
 
 pub const ABI_VERSION: &str = "0.1.0-pre";

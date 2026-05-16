@@ -2,6 +2,7 @@ import { createResource, onCleanup, onMount, Show, type Component } from "solid-
 import FlowGraph from "./FlowGraph";
 import FlowTable from "./FlowTable";
 import { createFlowStore } from "./flowStore";
+import { createSnapshotStore } from "./snapshotStore";
 import type { VersionInfo } from "./types";
 
 const fetchVersion = async (): Promise<VersionInfo> => {
@@ -15,12 +16,31 @@ const wsUrl = (): string => {
   return `${proto}//${window.location.host}/ws/flows`;
 };
 
+const formatBytesPerSec = (n: number): string => {
+  if (n < 1024) return `${n.toFixed(0)} B/s`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB/s`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB/s`;
+};
+
 const App: Component = () => {
   const [version] = createResource(fetchVersion);
-  const store = createFlowStore(wsUrl());
+  const flowStore = createFlowStore(wsUrl());
+  const snapshotStore = createSnapshotStore();
 
-  onMount(store.connect);
-  onCleanup(store.disconnect);
+  onMount(() => {
+    flowStore.connect();
+    snapshotStore.start();
+  });
+  onCleanup(() => {
+    flowStore.disconnect();
+    snapshotStore.stop();
+  });
+
+  const totalBytesPerSec = () => {
+    const s = snapshotStore.snapshot();
+    if (!s) return 0;
+    return s.edges.reduce((sum, e) => sum + e.bytes_per_sec, 0);
+  };
 
   return (
     <main class="min-h-screen bg-zinc-950 text-zinc-100 font-mono flex flex-col">
@@ -35,22 +55,53 @@ const App: Component = () => {
             )}
           </Show>
         </div>
-        <ConnectionPill state={store.connection()} count={store.flows().length} />
+        <div class="flex items-center gap-4">
+          <TopologyStat snapshot={snapshotStore.snapshot()} totalBps={totalBytesPerSec()} />
+          <ConnectionPill state={flowStore.connection()} />
+        </div>
       </header>
 
       <div class="flex-1 grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-px bg-zinc-800 overflow-hidden">
         <section class="bg-zinc-950 p-4 overflow-hidden">
-          <FlowGraph flows={store.flows()} />
+          <FlowGraph snapshot={snapshotStore.snapshot()} />
         </section>
-        <section class="bg-zinc-950 overflow-hidden">
-          <FlowTable flows={store.flows()} />
+        <section class="bg-zinc-950 overflow-hidden flex flex-col">
+          <div class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800/60">
+            Recent flows
+          </div>
+          <FlowTable flows={flowStore.flows()} />
         </section>
       </div>
     </main>
   );
 };
 
-const ConnectionPill: Component<{ state: string; count: number }> = (props) => {
+const TopologyStat: Component<{
+  snapshot: ReturnType<ReturnType<typeof createSnapshotStore>["snapshot"]>;
+  totalBps: number;
+}> = (props) => {
+  const counts = () => {
+    const s = props.snapshot;
+    if (!s) return { nodes: 0, edges: 0 };
+    return { nodes: s.nodes.length, edges: s.edges.length };
+  };
+
+  return (
+    <div class="text-[10px] text-zinc-500 flex items-center gap-3">
+      <span>
+        <span class="text-zinc-300">{counts().nodes}</span> nodes
+      </span>
+      <span class="text-zinc-700">·</span>
+      <span>
+        <span class="text-zinc-300">{counts().edges}</span> edges
+      </span>
+      <span class="text-zinc-700">·</span>
+      <span class="text-amber-300">{formatBytesPerSec(props.totalBps)}</span>
+    </div>
+  );
+};
+
+const ConnectionPill: Component<{ state: string }> = (props) => {
   const dotClass = () => {
     switch (props.state) {
       case "open":
@@ -66,8 +117,6 @@ const ConnectionPill: Component<{ state: string; count: number }> = (props) => {
     <div class="flex items-center gap-2 text-[10px] text-zinc-500">
       <span class={`size-1.5 rounded-full ${dotClass()}`} />
       <span>{props.state}</span>
-      <span class="text-zinc-700">·</span>
-      <span>{props.count} flows</span>
     </div>
   );
 };

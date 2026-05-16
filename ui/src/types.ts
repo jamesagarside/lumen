@@ -29,6 +29,38 @@ export interface VersionInfo {
   abi_version: string;
 }
 
+// Mirror of lumen_core::Snapshot. SystemTime serialises as
+// { secs_since_epoch, nanos_since_epoch }.
+type SystemTimeJson = { secs_since_epoch: number; nanos_since_epoch: number };
+
+export interface Node {
+  id: string; // serde-transparent NodeId(IpAddr) → IP string
+  is_internal: boolean;
+  first_seen: SystemTimeJson;
+  last_seen: SystemTimeJson;
+}
+
+export interface EdgeId {
+  src: string;
+  dst: string;
+}
+
+export interface Edge {
+  id: EdgeId;
+  first_seen: SystemTimeJson;
+  last_seen: SystemTimeJson;
+  bytes_total: number;
+  packets_total: number;
+  flows_seen: number;
+  bytes_per_sec: number;
+}
+
+export interface Snapshot {
+  generated_at: SystemTimeJson;
+  nodes: Node[];
+  edges: Edge[];
+}
+
 export const protocolName = (n: number): string => {
   switch (n) {
     case 1:
