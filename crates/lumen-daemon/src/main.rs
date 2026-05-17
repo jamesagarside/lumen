@@ -59,8 +59,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some(addr) = config.netflow_v5_listen {
         let bus = bus.clone();
         tokio::spawn(async move {
-            if let Err(e) = udp_listener::run(addr, udp_listener::NetflowV5Parser, bus).await {
-                error!(listener = "netflow_v5", error = %e, "ingest listener exited");
+            if let Err(e) = udp_listener::run(addr, bus).await {
+                error!(listener = "netflow", error = %e, "ingest listener exited");
             }
         });
     }

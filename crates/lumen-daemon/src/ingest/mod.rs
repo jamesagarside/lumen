@@ -8,6 +8,7 @@
 
 pub mod broadcast;
 pub mod netflow_v5;
+pub mod netflow_v9;
 pub mod udp_listener;
 
 pub use broadcast::FlowBus;
