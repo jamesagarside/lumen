@@ -147,6 +147,10 @@ All operational config is via environment variables (per `CONTEXT.md` §15):
 | `OTEL_SERVICE_NAME` | `lumen` | Service name attached to exported spans. |
 | `LUMEN_INITIAL_ADMIN_EMAIL` | (unset) | First-run admin bootstrap. Required alongside `LUMEN_INITIAL_ADMIN_PASSWORD` on the first start, otherwise nobody can log in. |
 | `LUMEN_INITIAL_ADMIN_PASSWORD` | (unset) | First-run admin password. After the admin exists this is ignored. |
+| `UDM_URL` | (unset) | UniFi Network Integration API URL, e.g. `https://192.168.0.1/proxy/network/integration/v1/sites`. Set both this and `UDM_API_KEY` to auto-label devices from the controller. |
+| `UDM_API_KEY` | (unset) | UniFi API key (Settings → Control Plane → Integrations → Create API Key). |
+
+Lumen loads `.env` at startup via `dotenvy` — copy `.env.example` to `.env` and fill in the values for local dev.
 
 User-facing settings (device labels, plugin config, role assignments, etc.) live in the topology DB, not env vars. See `CONTEXT.md` §11 and §15.
 

@@ -20,6 +20,7 @@ mod auth;
 mod brand;
 mod config;
 mod ingest;
+mod integrations;
 mod metrics;
 mod observability;
 mod routes;
@@ -28,6 +29,12 @@ mod topology_store;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env if present — useful for dev (API keys, OTEL endpoint,
+    // etc.) and harmless in container deployments where env vars
+    // come from elsewhere. Errors are intentional — file not existing
+    // is fine.
+    let _ = dotenvy::dotenv();
+
     observability::init();
     metrics::install()?;
 
@@ -78,6 +85,22 @@ async fn main() -> anyhow::Result<()> {
                 error!(listener = "syslog", error = %e, "ingest listener exited");
             }
         });
+    }
+
+    // UniFi integration: opt-in via UDM_URL + UDM_API_KEY. Auto-
+    // labels nodes whose IPs the controller knows about.
+    if let (Ok(url), Ok(key)) = (std::env::var("UDM_URL"), std::env::var("UDM_API_KEY")) {
+        let url = url.trim();
+        let key = key.trim();
+        if !url.is_empty() && !key.is_empty() {
+            match integrations::unifi::UnifiClient::new(url.to_string(), key.to_string()) {
+                Ok(client) => {
+                    info!(url = %url, "unifi integration enabled");
+                    integrations::unifi::spawn(client, engine.clone());
+                }
+                Err(e) => error!(error = %e, "unifi integration init failed"),
+            }
+        }
     }
 
     let app = build_router(&config, state);

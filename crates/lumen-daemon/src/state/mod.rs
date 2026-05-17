@@ -66,6 +66,41 @@ impl LiveStateEngine {
         }
     }
 
+    /// Set a label only if the node doesn't already have one.
+    /// Used by integrations (UniFi controller, etc.) that auto-name
+    /// devices but must never clobber a name the user typed.
+    /// Returns `Ok(true)` if we wrote, `Ok(false)` if we left an
+    /// existing label alone or the node isn't in the topology.
+    #[tracing::instrument(skip(self), fields(node = %id.0))]
+    pub fn set_node_label_if_unset(&self, id: &NodeId, label: &str) -> anyhow::Result<bool> {
+        if label.is_empty() {
+            return Ok(false);
+        }
+        // Probe before writing — avoids the redb write txn (and its
+        // fsync) when the label is already set.
+        {
+            let state = self.inner.read().expect("engine state poisoned");
+            match state.nodes.get(id) {
+                Some(n) if n.label.is_some() => return Ok(false),
+                Some(_) => {} // present + unlabelled, proceed
+                None => return Ok(false),
+            }
+        }
+        if let Some(store) = &self.topology_store {
+            store.set_node_label(id, label)?;
+        }
+        let mut state = self.inner.write().expect("engine state poisoned");
+        if let Some(n) = state.nodes.get_mut(id) {
+            // Re-check under write lock — another thread might have
+            // labelled it between our read and write.
+            if n.label.is_none() {
+                n.label = Some(label.to_string());
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Persist a user-supplied label for `id` and apply it to the
     /// in-memory node (if present). Returns the updated `Node` for
     /// the caller (HTTP handler) to send back as the response. An
