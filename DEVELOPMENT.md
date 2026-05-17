@@ -17,6 +17,7 @@ Two ways to run Lumen locally: **fast iteration** (recommended for day-to-day wo
 This path skips Docker entirely. The daemon runs natively as a normal `cargo run` process; the UI runs through Vite's dev server with HMR. Vite proxies API and WebSocket calls to the daemon.
 
 **One-time setup:**
+
 ```bash
 make install   # npm install in ui/
 ```
@@ -24,21 +25,26 @@ make install   # npm install in ui/
 **Two terminals.**
 
 Terminal A — the daemon:
+
 ```bash
 make dev-daemon
 # equivalent: cargo run --bin lumen
 ```
+
 This binds:
+
 - HTTP + WebSocket on `http://localhost:3000` (`/healthz`, `/version`, `/ws/flows`)
 - NetFlow v5 ingest on UDP `localhost:2055`
 
 If you have `cargo-watch` installed, the daemon auto-rebuilds on file changes (~2s incremental).
 
 Terminal B — the UI dev server:
+
 ```bash
 make dev-ui
 # equivalent: cd ui && npm run dev
 ```
+
 Vite serves the UI on `http://localhost:5173` with hot module reload. API calls (`/version`, `/ws/flows`) are proxied to `localhost:3000`.
 
 **Open `http://localhost:5173` in a browser.** You should see the Lumen header showing connection state = `open`.
@@ -53,6 +59,7 @@ make demo
 Sends one synthetic NetFlow v5 packet containing two flow records. Within a frame you should see them in the UI table and on the graph.
 
 For a continuous stream:
+
 ```bash
 python3 scripts/send_netflow.py 2055 100  # 100 packets, ~10/sec
 make demo-stream                          # ~5 packets/sec, runs forever
@@ -104,6 +111,7 @@ make logs   # tails the daemon container
 ```
 
 Container logs are JSON-formatted by default. Pipe through `jq` for readable output:
+
 ```bash
 docker compose logs -f lumen | jq -r '. | "[\(.level)] \(.fields.message)"'
 ```
@@ -148,7 +156,7 @@ User-facing settings (device labels, plugin config, role assignments, etc.) live
 
 ## Project layout
 
-```
+```text
 .
 ├── CONTEXT.md           Canonical design spec (always current)
 ├── DEVELOPMENT.md       This file
