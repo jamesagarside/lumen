@@ -33,6 +33,13 @@ pub struct TopologyStore {
 }
 
 impl TopologyStore {
+    /// Share the underlying redb handle (e.g. with AuthStore, which
+    /// uses different tables in the same file). redb allows a single
+    /// Database handle to back many domain-specific table wrappers.
+    pub fn db(&self) -> Arc<Database> {
+        self.db.clone()
+    }
+
     /// Open (or create) a topology DB at the given path. The parent
     /// directory must already exist.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {

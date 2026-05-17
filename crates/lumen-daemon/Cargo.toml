@@ -36,6 +36,10 @@ thiserror = { workspace = true }
 redb = { workspace = true }
 ipnet = { workspace = true }
 
+argon2 = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 

@@ -1,8 +1,19 @@
-import { createResource, createSignal, onCleanup, onMount, Show, type Component } from "solid-js";
+import {
+  createResource,
+  createSignal,
+  Match,
+  onCleanup,
+  onMount,
+  Show,
+  Switch,
+  type Component,
+} from "solid-js";
 import DaemonBanner from "./DaemonBanner";
 import FlowTable from "./FlowTable";
+import Login from "./Login";
 import NodeInspector from "./NodeInspector";
 import SigmaGraph from "./SigmaGraph";
+import { createAuthStore } from "./authStore";
 import { createFlowStore } from "./flowStore";
 import { createSnapshotStore } from "./snapshotStore";
 import type { VersionInfo } from "./types";
@@ -25,6 +36,45 @@ const formatBytesPerSec = (n: number): string => {
 };
 
 const App: Component = () => {
+  const authStore = createAuthStore();
+
+  onMount(() => {
+    void authStore.refresh();
+  });
+
+  return (
+    <Switch>
+      <Match when={authStore.state().status === "loading"}>
+        <main class="h-screen bg-zinc-950 text-zinc-100 font-mono flex items-center justify-center">
+          <span class="text-[10px] text-zinc-600">loading…</span>
+        </main>
+      </Match>
+      <Match when={authStore.state().status === "anonymous"}>
+        <Login onLogin={authStore.login} />
+      </Match>
+      <Match when={authStore.state().status === "authed"}>
+        <AuthedApp
+          onLogout={() => void authStore.logout()}
+          can={authStore.can}
+          userEmail={
+            authStore.state().status === "authed"
+              ? (authStore.state() as { status: "authed"; me: { user: { email: string } } }).me
+                  .user.email
+              : ""
+          }
+        />
+      </Match>
+    </Switch>
+  );
+};
+
+interface AuthedAppProps {
+  onLogout: () => void;
+  can: (capability: string) => boolean;
+  userEmail: string;
+}
+
+const AuthedApp: Component<AuthedAppProps> = (props) => {
   const [version] = createResource(fetchVersion);
   const flowStore = createFlowStore(wsUrl());
   const snapshotStore = createSnapshotStore();
@@ -81,6 +131,17 @@ const App: Component = () => {
             Re-layout
           </button>
           <ConnectionPill state={flowStore.connection()} />
+          <div class="flex items-center gap-2 text-[10px] text-zinc-500 border-l border-zinc-800 pl-3 ml-1">
+            <span title={props.userEmail}>{props.userEmail.split("@")[0]}</span>
+            <button
+              type="button"
+              class="text-zinc-500 hover:text-zinc-300"
+              onClick={props.onLogout}
+              title="sign out"
+            >
+              ↩
+            </button>
+          </div>
         </div>
       </header>
 

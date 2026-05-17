@@ -1,6 +1,7 @@
 use anyhow::Context;
 use std::sync::Arc;
 
+use axum::middleware;
 use axum::routing::{get, patch, post};
 use axum::Router;
 use tokio::net::TcpListener;
@@ -9,11 +10,13 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
+use crate::auth::{AuthStore, Role};
 use crate::ingest::{syslog, udp_listener, FlowBus};
 use crate::routes::AppState;
 use crate::state::LiveStateEngine;
 use crate::topology_store::TopologyStore;
 
+mod auth;
 mod brand;
 mod config;
 mod ingest;
@@ -39,10 +42,13 @@ async fn main() -> anyhow::Result<()> {
 
     let bus = FlowBus::new();
     let topology_store = open_topology_store(&config)?;
+    let auth_store = AuthStore::new(topology_store.db()).context("opening auth store")?;
+    bootstrap_admin(&auth_store, &config)?;
     let engine = LiveStateEngine::with_store(Some(topology_store));
     let state = AppState {
         bus: bus.clone(),
         engine: engine.clone(),
+        auth: auth_store,
         ingest_api_key: config.ingest_api_key.as_deref().map(Arc::from),
     };
 
@@ -90,13 +96,36 @@ async fn main() -> anyhow::Result<()> {
 
 fn build_router(config: &config::Config, state: AppState) -> Router {
     let mut router = Router::new()
+        // Always-open routes (operational; pre-auth).
         .route("/healthz", get(routes::healthz))
         .route("/version", get(routes::version))
         .route("/metrics", get(routes::metrics))
+        // Auth surface.
+        .route("/auth/login", post(routes::login))
+        .route("/auth/logout", post(routes::logout))
+        .route("/auth/me", get(routes::me))
+        // Authed read surface (no capability check; auth_extension
+        // attaches the user if a session is valid, frontend uses
+        // /auth/me to gate UI).
         .route("/snapshot", get(routes::snapshot))
-        .route("/nodes/:id", patch(routes::patch_node))
-        .route("/ingest/flows", post(routes::ingest_flows))
         .route("/ws/flows", get(routes::ws_flows))
+        // Mutating endpoints — gated.
+        .route(
+            "/nodes/:id",
+            patch(routes::patch_node).route_layer(middleware::from_fn(routes::require_cap(
+                crate::auth::cap::EDIT_DEVICE_LABELS,
+            ))),
+        )
+        .route(
+            "/ingest/flows",
+            post(routes::ingest_flows).route_layer(middleware::from_fn(routes::require_cap(
+                crate::auth::cap::INGEST_FLOWS,
+            ))),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::auth_extension,
+        ))
         .with_state(state);
 
     if let Some(dir) = &config.ui_assets_dir {
@@ -104,6 +133,28 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
     }
 
     router.layer(TraceLayer::new_for_http())
+}
+
+fn bootstrap_admin(auth: &AuthStore, _config: &config::Config) -> anyhow::Result<()> {
+    let email = std::env::var("LUMEN_INITIAL_ADMIN_EMAIL").ok();
+    let password = std::env::var("LUMEN_INITIAL_ADMIN_PASSWORD").ok();
+    let (Some(email), Some(password)) = (email, password) else {
+        if auth.user_count()? == 0 {
+            tracing::warn!(
+                "no users exist and LUMEN_INITIAL_ADMIN_EMAIL / LUMEN_INITIAL_ADMIN_PASSWORD \
+                 are unset — set both to bootstrap an admin user"
+            );
+        }
+        return Ok(());
+    };
+    if auth.find_by_email(&email)?.is_some() {
+        tracing::debug!(email = %email, "bootstrap admin already exists");
+        return Ok(());
+    }
+    auth.create_user(&email, &password, Role::Admin)
+        .with_context(|| format!("bootstrapping admin {email}"))?;
+    tracing::info!(email = %email, "bootstrapped admin user");
+    Ok(())
 }
 
 fn open_topology_store(config: &config::Config) -> anyhow::Result<TopologyStore> {
@@ -198,9 +249,12 @@ mod tests {
     }
 
     fn test_state() -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(redb::Database::create(tmp.path().join("t.redb")).unwrap());
         AppState {
             bus: FlowBus::new(),
             engine: LiveStateEngine::new(),
+            auth: AuthStore::new(db).unwrap(),
             ingest_api_key: None,
         }
     }

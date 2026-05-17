@@ -2,23 +2,28 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::extract::{Path, Request, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lumen_core::{Flow, FlowSource, Node, NodeId, Position, Snapshot};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
 
+use crate::auth::{AuthStore, User, UserSummary};
 use crate::ingest::FlowBus;
 use crate::metrics::{self as app_metrics, FLOWS_INGESTED, WS_CLIENTS};
 use crate::state::LiveStateEngine;
+
+const SESSION_COOKIE: &str = "lumen_session";
 
 #[derive(Clone)]
 pub struct AppState {
     pub bus: FlowBus,
     pub engine: LiveStateEngine,
+    pub auth: AuthStore,
     /// If `Some`, every POST /ingest/flows must include a matching
     /// `X-Api-Key` header. If `None`, ingestion is open.
     pub ingest_api_key: Option<Arc<str>>,
@@ -57,6 +62,173 @@ pub async fn version() -> Json<VersionInfo> {
 pub async fn snapshot(State(state): State<AppState>) -> Json<Snapshot> {
     Json(state.engine.snapshot())
 }
+
+// ── Auth routes ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct LoginResponse {
+    pub user: UserSummary,
+    pub capabilities: Vec<&'static str>,
+}
+
+pub async fn login(
+    State(state): State<AppState>,
+    Json(req): Json<LoginRequest>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let user = state.auth.find_by_email(&req.email).map_err(internal_err)?;
+    let Some(user) = user else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "invalid email or password".to_string(),
+            }),
+        ));
+    };
+    if !crate::auth::verify_password(&req.password, &user.password_hash) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "invalid email or password".to_string(),
+            }),
+        ));
+    }
+    let token = state.auth.create_session(&user.id).map_err(internal_err)?;
+    let cookie = session_cookie(&token, false);
+    let body = LoginResponse {
+        user: (&user).into(),
+        capabilities: user.role.capabilities().to_vec(),
+    };
+    let mut response = Json(body).into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().unwrap());
+    Ok(response)
+}
+
+pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) = session_token_from(&headers) {
+        let _ = state.auth.delete_session(&token);
+    }
+    let mut response = (StatusCode::NO_CONTENT, ()).into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        session_cookie("", true).parse().unwrap(),
+    );
+    response
+}
+
+/// `GET /auth/me` — returns the current user + capabilities, or 401.
+/// The UI polls this on load to decide whether to show the login
+/// screen or the app.
+pub async fn me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<LoginResponse>, (StatusCode, Json<ApiError>)> {
+    let Some(token) = session_token_from(&headers) else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "not authenticated".to_string(),
+            }),
+        ));
+    };
+    let user = state.auth.lookup_session(&token).map_err(internal_err)?;
+    let Some(user) = user else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "not authenticated".to_string(),
+            }),
+        ));
+    };
+    Ok(Json(LoginResponse {
+        user: (&user).into(),
+        capabilities: user.role.capabilities().to_vec(),
+    }))
+}
+
+fn internal_err<E: std::fmt::Display>(e: E) -> (StatusCode, Json<ApiError>) {
+    warn!(error = %e, "internal error");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiError {
+            error: "internal error".to_string(),
+        }),
+    )
+}
+
+fn session_cookie(value: &str, expire: bool) -> String {
+    let max_age = if expire { 0 } else { 7 * 24 * 60 * 60 };
+    format!("{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}")
+}
+
+fn session_token_from(headers: &HeaderMap) -> Option<String> {
+    let header = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in header.split(';') {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix(&format!("{SESSION_COOKIE}=")) {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
+// ── Auth middleware ─────────────────────────────────────────────────────────
+
+/// Resolve the request's session cookie to a User and attach it as
+/// a request extension. Always allows the request through — gating
+/// is done by `require_capability` on individual routes.
+pub async fn auth_extension(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    if let Some(token) = session_token_from(&headers) {
+        if let Ok(Some(user)) = state.auth.lookup_session(&token) {
+            req.extensions_mut().insert(user);
+        }
+    }
+    next.run(req).await
+}
+
+/// Capability-gating middleware factory. Used per-route:
+/// `.route_layer(middleware::from_fn(require_cap(cap::EDIT_DEVICE_LABELS)))`.
+pub fn require_cap(
+    capability: &'static str,
+) -> impl Fn(Request, Next) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>> + Clone {
+    move |req: Request, next: Next| {
+        Box::pin(async move {
+            let Some(user) = req.extensions().get::<User>() else {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ApiError {
+                        error: "not authenticated".to_string(),
+                    }),
+                )
+                    .into_response();
+            };
+            if !user.role.has(capability) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ApiError {
+                        error: format!("missing required capability: {capability}"),
+                    }),
+                )
+                    .into_response();
+            }
+            next.run(req).await
+        })
+    }
+}
+
+use std::future::Future;
 
 #[derive(Serialize)]
 pub struct IngestAccepted {

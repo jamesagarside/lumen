@@ -42,6 +42,11 @@ thiserror = "2"
 # Storage
 redb = "2"
 
+# Auth
+argon2 = "0.5"
+rand = "0.8"
+hex = "0.4"
+
 # Networking helpers
 ipnet = "2"
 

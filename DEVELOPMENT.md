@@ -145,6 +145,8 @@ All operational config is via environment variables (per `CONTEXT.md` §15):
 | `LUMEN_INGEST_API_KEY` | (unset) | Optional shared secret required by `POST /ingest/flows`. Unset = open ingestion. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | If set, traces are exported via OTLP/gRPC. The standard `OTEL_*` env vars (service name, headers, etc.) are also honored. |
 | `OTEL_SERVICE_NAME` | `lumen` | Service name attached to exported spans. |
+| `LUMEN_INITIAL_ADMIN_EMAIL` | (unset) | First-run admin bootstrap. Required alongside `LUMEN_INITIAL_ADMIN_PASSWORD` on the first start, otherwise nobody can log in. |
+| `LUMEN_INITIAL_ADMIN_PASSWORD` | (unset) | First-run admin password. After the admin exists this is ignored. |
 
 User-facing settings (device labels, plugin config, role assignments, etc.) live in the topology DB, not env vars. See `CONTEXT.md` §11 and §15.
 
