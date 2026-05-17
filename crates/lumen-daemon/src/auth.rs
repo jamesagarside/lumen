@@ -34,6 +34,7 @@ pub mod cap {
     pub const EDIT_DEVICE_LABELS: &str = "edit_device_labels";
     pub const EDIT_DEVICE_POSITIONS: &str = "edit_device_positions";
     pub const INGEST_FLOWS: &str = "ingest_flows";
+    pub const INGEST_DETECTIONS: &str = "ingest_detections";
     pub const MANAGE_USERS: &str = "manage_users";
 }
 
@@ -58,6 +59,7 @@ impl Role {
                 cap::EDIT_DEVICE_LABELS,
                 cap::EDIT_DEVICE_POSITIONS,
                 cap::INGEST_FLOWS,
+                cap::INGEST_DETECTIONS,
                 cap::MANAGE_USERS,
             ],
             Role::Operator => &[
@@ -66,6 +68,7 @@ impl Role {
                 cap::EDIT_DEVICE_LABELS,
                 cap::EDIT_DEVICE_POSITIONS,
                 cap::INGEST_FLOWS,
+                cap::INGEST_DETECTIONS,
             ],
             Role::Viewer => &[cap::VIEW_GRAPH, cap::VIEW_DETECTIONS],
             // NOC Display is read-only with chrome stripped via a UI

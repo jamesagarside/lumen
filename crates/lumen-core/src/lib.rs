@@ -6,9 +6,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod detection;
 pub mod flow;
 pub mod graph;
 
+pub use detection::{Agent, DetectionEvent, EventKind, Rule, Severity};
 pub use flow::{Flow, FlowEndpoint, FlowSource, Protocol};
 pub use graph::{is_internal_ip, Delta, Edge, EdgeId, Node, NodeId, Position, Snapshot};
 

@@ -9,6 +9,7 @@ description = "Core domain types for Lumen"
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

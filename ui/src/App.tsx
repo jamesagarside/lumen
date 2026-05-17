@@ -9,11 +9,13 @@ import {
   type Component,
 } from "solid-js";
 import DaemonBanner from "./DaemonBanner";
+import EventsSidebar from "./EventsSidebar";
 import FlowTable from "./FlowTable";
 import Login from "./Login";
 import NodeInspector from "./NodeInspector";
 import SigmaGraph from "./SigmaGraph";
 import { createAuthStore } from "./authStore";
+import { createEventsStore } from "./eventsStore";
 import { createFlowStore } from "./flowStore";
 import { createSnapshotStore } from "./snapshotStore";
 import type { VersionInfo } from "./types";
@@ -74,21 +76,31 @@ interface AuthedAppProps {
   userEmail: string;
 }
 
+type RightPane = "flows" | "events";
+
 const AuthedApp: Component<AuthedAppProps> = (props) => {
   const [version] = createResource(fetchVersion);
   const flowStore = createFlowStore(wsUrl());
   const snapshotStore = createSnapshotStore();
+  const eventsStore = createEventsStore();
   const [selectedNode, setSelectedNode] = createSignal<string | null>(null);
   const [relayoutTick, setRelayoutTick] = createSignal(0);
+  const [pane, setPane] = createSignal<RightPane>("flows");
 
   onMount(() => {
     flowStore.connect();
     snapshotStore.start();
+    eventsStore.start();
   });
   onCleanup(() => {
     flowStore.disconnect();
     snapshotStore.stop();
+    eventsStore.stop();
   });
+
+  // Unread-badge state on the Detections tab.
+  const detectionsCount = () => eventsStore.events().length;
+  let seenAtCount = 0;
 
   const totalBytesPerSec = () => {
     const s = snapshotStore.snapshot();
@@ -149,6 +161,7 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
         <section class="bg-zinc-950 min-h-0 overflow-hidden">
           <SigmaGraph
             snapshot={snapshotStore.snapshot()}
+            events={eventsStore.events()}
             selectedNodeId={selectedNode()}
             onSelectionChange={setSelectedNode}
             relayoutSignal={relayoutTick()}
@@ -159,16 +172,38 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
             when={selectedNode()}
             fallback={
               <div class="flex-1 min-h-0 flex flex-col">
-                <div class="px-3 py-1.5 border-b border-zinc-800/60 flex items-baseline justify-between flex-shrink-0">
-                  <span class="text-[10px] uppercase tracking-wider text-zinc-500">
-                    Recent flows
-                  </span>
-                  <span class="text-[9px] text-zinc-700">
-                    live tail · resets on refresh
+                <div class="flex border-b border-zinc-800/60 flex-shrink-0">
+                  <PaneTab
+                    label="Recent flows"
+                    active={pane() === "flows"}
+                    onClick={() => setPane("flows")}
+                  />
+                  <PaneTab
+                    label="Detections"
+                    active={pane() === "events"}
+                    count={detectionsCount()}
+                    unread={pane() !== "events" ? Math.max(0, detectionsCount() - seenAtCount) : 0}
+                    onClick={() => {
+                      seenAtCount = detectionsCount();
+                      setPane("events");
+                    }}
+                  />
+                  <span class="ml-auto px-3 py-1.5 text-[9px] text-zinc-700 self-center">
+                    {pane() === "flows" ? "live tail · resets on refresh" : "polled · 2Hz"}
                   </span>
                 </div>
-                <div class="flex-1 min-h-0 overflow-auto">
-                  <FlowTable flows={flowStore.flows()} />
+                <div class="flex-1 min-h-0 overflow-hidden">
+                  <Show when={pane() === "flows"}>
+                    <div class="h-full overflow-auto">
+                      <FlowTable flows={flowStore.flows()} />
+                    </div>
+                  </Show>
+                  <Show when={pane() === "events"}>
+                    <EventsSidebar
+                      events={eventsStore.events()}
+                      onSelectIp={(ip) => setSelectedNode(ip)}
+                    />
+                  </Show>
                 </div>
               </div>
             }
@@ -212,6 +247,34 @@ const TopologyStat: Component<{
     </div>
   );
 };
+
+const PaneTab: Component<{
+  label: string;
+  active: boolean;
+  count?: number;
+  unread?: number;
+  onClick: () => void;
+}> = (props) => (
+  <button
+    type="button"
+    onClick={props.onClick}
+    class={`px-3 py-1.5 text-[10px] uppercase tracking-wider border-b -mb-px transition-colors ${
+      props.active
+        ? "text-zinc-200 border-amber-500/60"
+        : "text-zinc-500 border-transparent hover:text-zinc-300"
+    }`}
+  >
+    {props.label}
+    <Show when={props.count !== undefined && props.count > 0}>
+      <span class="ml-1.5 text-zinc-600">{props.count}</span>
+    </Show>
+    <Show when={props.unread !== undefined && props.unread > 0}>
+      <span class="ml-1 inline-flex items-center justify-center min-w-[14px] px-1 py-px text-[9px] bg-rose-500/30 text-rose-300 rounded-full">
+        {props.unread}
+      </span>
+    </Show>
+  </button>
+);
 
 const ConnectionPill: Component<{ state: string }> = (props) => {
   const dotClass = () => {

@@ -51,6 +51,51 @@ export interface Node {
 /** Display name precedence: user label > recognised brand > raw IP. */
 export const displayName = (n: Node): string => n.label || n.brand || n.id;
 
+// ── Detection events ────────────────────────────────────────────────────────
+
+export interface DetectionEvent {
+  "@timestamp": SystemTimeJson;
+  "event.kind": "alert" | "event" | "signal" | "state";
+  "event.category"?: string[];
+  "event.severity": number;
+  "event.action"?: string;
+  message: string;
+  rule?: {
+    id?: string;
+    name?: string;
+    description?: string;
+    category?: string;
+  };
+  agent: { type: string; vendor?: string; version?: string };
+  "source.ip"?: string;
+  "destination.ip"?: string;
+  "url.original"?: string;
+  extra?: unknown;
+}
+
+export const severityName = (s: number): string => {
+  if (s <= 2) return "info";
+  if (s <= 4) return "low";
+  if (s === 5) return "medium";
+  if (s === 6) return "high";
+  return "critical";
+};
+
+/**
+ * Tailwind class chunk for a severity badge. Kept here so the same
+ * palette is used in the sidebar pill, the graph halo, and any future
+ * scrubber mark.
+ */
+export const severityColor = (
+  s: number,
+): { dot: string; text: string; ring: string } => {
+  if (s <= 2) return { dot: "bg-zinc-500", text: "text-zinc-400", ring: "rgba(161,161,170,0.7)" };
+  if (s <= 4) return { dot: "bg-sky-500", text: "text-sky-400", ring: "rgba(56,189,248,0.7)" };
+  if (s === 5) return { dot: "bg-amber-500", text: "text-amber-400", ring: "rgba(245,158,11,0.7)" };
+  if (s === 6) return { dot: "bg-orange-500", text: "text-orange-400", ring: "rgba(249,115,22,0.85)" };
+  return { dot: "bg-rose-500", text: "text-rose-400", ring: "rgba(244,63,94,0.95)" };
+};
+
 export interface EdgeId {
   src: string;
   dst: string;

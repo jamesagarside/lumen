@@ -2,8 +2,8 @@ import { onCleanup, onMount, createEffect, type Component } from "solid-js";
 import Graph from "graphology";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import Sigma from "sigma";
-import { displayName } from "./types";
-import type { Snapshot } from "./types";
+import { displayName, severityColor } from "./types";
+import type { DetectionEvent, Snapshot } from "./types";
 
 // Anchor positions for the semantic layout (CONTEXT.md §8):
 // gateway pinned at the top, internal devices cluster centred,
@@ -25,6 +25,8 @@ interface NodeMeta {
 
 interface Props {
   snapshot: Snapshot | null;
+  /** Recent detection events — drives the halo overlay. */
+  events?: DetectionEvent[];
   onSelectionChange?: (id: string | null) => void;
   selectedNodeId?: string | null;
   /** Trigger a one-shot full re-layout (called when the user clicks Re-layout). */
@@ -91,15 +93,25 @@ const SigmaGraph: Component<Props> = (props) => {
       minCameraRatio: 0.1,
       maxCameraRatio: 5,
       nodeReducer: (id, attrs) => {
+        // If the node has a recent detection event, paint it in
+        // the severity colour and force its label visible regardless
+        // of hover/selection — alerts must always be findable.
+        const halo = attrs.haloColor as string | undefined;
+        const sevDecoration = halo
+          ? { color: halo, size: ((attrs.size as number | undefined) ?? 4) + 2, forceLabel: true, zIndex: 3 }
+          : null;
+
         const f = focused();
-        if (!f || !graph) return attrs;
+        if (!f || !graph) return sevDecoration ? { ...attrs, ...sevDecoration } : attrs;
         if (id === f) {
-          return { ...attrs, color: COLOR_HIGHLIGHT_EDGE, zIndex: 2, forceLabel: true };
+          return { ...attrs, ...sevDecoration, color: COLOR_HIGHLIGHT_EDGE, zIndex: 4, forceLabel: true };
         }
         if (graph.areNeighbors(f, id)) {
-          return { ...attrs, zIndex: 1, forceLabel: true };
+          return { ...attrs, ...sevDecoration, zIndex: 1, forceLabel: true };
         }
-        return { ...attrs, color: COLOR_DIM, label: "", zIndex: 0 };
+        return sevDecoration
+          ? { ...attrs, ...sevDecoration, label: "" }
+          : { ...attrs, color: COLOR_DIM, label: "", zIndex: 0 };
       },
       edgeReducer: (id, attrs) => {
         const f = focused();
@@ -209,6 +221,36 @@ const SigmaGraph: Component<Props> = (props) => {
       selectedNode = ext;
       sigma?.refresh();
     }
+  });
+
+  // Detection events → per-node halo. For each affected IP we keep
+  // the *highest severity* seen recently (one halo per node, the
+  // worst thing). Hovering / selecting a node continues to dim
+  // unrelated nodes — the halo just renders underneath that as a
+  // ring drawn during paint.
+  createEffect(() => {
+    const evts = props.events ?? [];
+    if (!graph || !sigma) return;
+    // Reset halos.
+    graph.forEachNode((id) => {
+      if (graph!.getNodeAttribute(id, "haloSev")) {
+        graph!.removeNodeAttribute(id, "haloSev");
+        graph!.removeNodeAttribute(id, "haloColor");
+      }
+    });
+    for (const e of evts) {
+      const sev = e["event.severity"] ?? 1;
+      const ring = severityColor(sev).ring;
+      for (const ip of [e["source.ip"], e["destination.ip"]]) {
+        if (!ip || !graph.hasNode(ip)) continue;
+        const existing = graph.getNodeAttribute(ip, "haloSev") as number | undefined;
+        if (existing === undefined || sev > existing) {
+          graph.setNodeAttribute(ip, "haloSev", sev);
+          graph.setNodeAttribute(ip, "haloColor", ring);
+        }
+      }
+    }
+    sigma.refresh();
   });
 
   // Manual full re-layout (escape hatch when the user wants a fresh

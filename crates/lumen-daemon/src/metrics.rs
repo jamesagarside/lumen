@@ -19,6 +19,7 @@ pub const TOPOLOGY_EDGES: &str = "lumen_topology_edges";
 pub const EVICTIONS: &str = "lumen_evictions_total";
 pub const WS_CLIENTS: &str = "lumen_ws_clients";
 pub const HTTP_REQUESTS: &str = "lumen_http_requests_total";
+pub const DETECTIONS: &str = "lumen_detections_total";
 
 static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
@@ -61,6 +62,10 @@ pub fn install() -> Result<()> {
     metrics::describe_counter!(
         HTTP_REQUESTS,
         "Total HTTP requests served, by route + status"
+    );
+    metrics::describe_counter!(
+        DETECTIONS,
+        "Detection events ingested, by source and severity"
     );
 
     Ok(())

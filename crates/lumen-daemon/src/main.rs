@@ -11,6 +11,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
 use crate::auth::{AuthStore, Role};
+use crate::detections::DetectionBus;
 use crate::ingest::{syslog, udp_listener, FlowBus};
 use crate::routes::AppState;
 use crate::state::LiveStateEngine;
@@ -19,6 +20,7 @@ use crate::topology_store::TopologyStore;
 mod auth;
 mod brand;
 mod config;
+mod detections;
 mod ingest;
 mod integrations;
 mod metrics;
@@ -48,12 +50,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let bus = FlowBus::new();
+    let detections = DetectionBus::new();
     let topology_store = open_topology_store(&config)?;
     let auth_store = AuthStore::new(topology_store.db()).context("opening auth store")?;
     bootstrap_admin(&auth_store, &config)?;
     let engine = LiveStateEngine::with_store(Some(topology_store));
     let state = AppState {
         bus: bus.clone(),
+        detections: detections.clone(),
         engine: engine.clone(),
         auth: auth_store,
         ingest_api_key: config.ingest_api_key.as_deref().map(Arc::from),
@@ -143,6 +147,13 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
             "/ingest/flows",
             post(routes::ingest_flows).route_layer(middleware::from_fn(routes::require_cap(
                 crate::auth::cap::INGEST_FLOWS,
+            ))),
+        )
+        .route("/events", get(routes::list_events))
+        .route(
+            "/ingest/events",
+            post(routes::ingest_events).route_layer(middleware::from_fn(routes::require_cap(
+                crate::auth::cap::INGEST_DETECTIONS,
             ))),
         )
         .layer(middleware::from_fn_with_state(
@@ -276,6 +287,7 @@ mod tests {
         let db = std::sync::Arc::new(redb::Database::create(tmp.path().join("t.redb")).unwrap());
         AppState {
             bus: FlowBus::new(),
+            detections: DetectionBus::new(),
             engine: LiveStateEngine::new(),
             auth: AuthStore::new(db).unwrap(),
             ingest_api_key: None,

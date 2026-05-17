@@ -13,8 +13,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
 
 use crate::auth::{AuthStore, User, UserSummary};
+use crate::detections::DetectionBus;
 use crate::ingest::FlowBus;
-use crate::metrics::{self as app_metrics, FLOWS_INGESTED, WS_CLIENTS};
+use crate::metrics::{self as app_metrics, DETECTIONS, FLOWS_INGESTED, WS_CLIENTS};
 use crate::state::LiveStateEngine;
 
 const SESSION_COOKIE: &str = "lumen_session";
@@ -22,6 +23,7 @@ const SESSION_COOKIE: &str = "lumen_session";
 #[derive(Clone)]
 pub struct AppState {
     pub bus: FlowBus,
+    pub detections: DetectionBus,
     pub engine: LiveStateEngine,
     pub auth: AuthStore,
     /// If `Some`, every POST /ingest/flows must include a matching
@@ -61,6 +63,44 @@ pub async fn version() -> Json<VersionInfo> {
 /// snapshot+delta WebSocket in #8.
 pub async fn snapshot(State(state): State<AppState>) -> Json<Snapshot> {
     Json(state.engine.snapshot())
+}
+
+// ── Detection events ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct EventsQuery {
+    /// Cap on the number of events returned. Default 100; max 500
+    /// (the ring buffer size).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /events` — recent detection events, newest first.
+pub async fn list_events(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<EventsQuery>,
+) -> Json<Vec<lumen_core::DetectionEvent>> {
+    let limit = q.limit.unwrap_or(100).min(500);
+    Json(state.detections.recent(limit))
+}
+
+/// `POST /events` — push one or more detection events into lumen.
+/// Producer plugins / integrations / curl users / scripts post here.
+pub async fn ingest_events(
+    State(state): State<AppState>,
+    Json(events): Json<Vec<lumen_core::DetectionEvent>>,
+) -> Result<(StatusCode, Json<IngestAccepted>), (StatusCode, Json<ApiError>)> {
+    let accepted = events.len();
+    for ev in events {
+        // Clamp severity defensively — clients can send any u8.
+        let mut ev = ev;
+        ev.severity = lumen_core::Severity::clamped(ev.severity.0);
+        let source = ev.agent.type_.clone();
+        let severity_name = ev.severity.name();
+        state.detections.publish(ev);
+        metrics::counter!(DETECTIONS, "source" => source, "severity" => severity_name).increment(1);
+    }
+    Ok((StatusCode::ACCEPTED, Json(IngestAccepted { accepted })))
 }
 
 // ── Auth routes ─────────────────────────────────────────────────────────────

@@ -15,8 +15,10 @@ export default defineConfig({
       "/version": "http://localhost:3000",
       "/snapshot": "http://localhost:3000",
       "/nodes": "http://localhost:3000",
+      "/events": "http://localhost:3000",
       "/ingest": "http://localhost:3000",
       "/auth": "http://localhost:3000",
+      "/metrics": "http://localhost:3000",
       "/ws/flows": {
         target: "ws://localhost:3000",
         ws: true,
