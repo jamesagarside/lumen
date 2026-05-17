@@ -19,6 +19,10 @@ build/
 *.swp
 *.swo
 
+# Python
+__pycache__/
+*.pyc
+
 # Environment
 .env
 .env.local
