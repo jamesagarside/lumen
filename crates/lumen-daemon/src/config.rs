@@ -33,8 +33,15 @@ impl Config {
             .map(PathBuf::from)
             .filter(|p| p.exists());
 
-        let netflow_v5_listen = parse_optional_socket_addr("LUMEN_NETFLOW_V5_LISTEN")?
-            .or_else(|| Some("0.0.0.0:2055".parse().unwrap()));
+        // Three cases: unset → default; "off" → None (disabled);
+        // anything else → must parse as a socket address.
+        let netflow_v5_listen = match std::env::var("LUMEN_NETFLOW_V5_LISTEN") {
+            Err(_) => Some("0.0.0.0:2055".parse().unwrap()),
+            Ok(v) if v.is_empty() || v == "off" => None,
+            Ok(v) => Some(v.parse().with_context(|| {
+                format!("LUMEN_NETFLOW_V5_LISTEN={v} is not a valid socket address")
+            })?),
+        };
 
         let edge_max_age = parse_duration_secs("LUMEN_EDGE_MAX_AGE_SECS", 300)?;
         let eviction_interval = parse_duration_secs("LUMEN_EVICTION_INTERVAL_SECS", 30)?;
@@ -68,16 +75,5 @@ fn parse_duration_secs(env_var: &str, default_secs: u64) -> Result<Duration> {
             Ok(Duration::from_secs(secs))
         }
         Err(_) => Ok(Duration::from_secs(default_secs)),
-    }
-}
-
-fn parse_optional_socket_addr(env_var: &str) -> Result<Option<SocketAddr>> {
-    match std::env::var(env_var) {
-        Ok(v) if v.is_empty() || v == "off" => Ok(None),
-        Ok(v) => v
-            .parse()
-            .map(Some)
-            .with_context(|| format!("{env_var}={v} is not a valid socket address")),
-        Err(_) => Ok(None),
     }
 }

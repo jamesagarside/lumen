@@ -26,6 +26,10 @@ tower-http = { version = "0.6", features = ["trace", "fs"] }
 # Tracing / observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.31"
+opentelemetry = "0.30"
+opentelemetry_sdk = { version = "0.30", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30", features = ["grpc-tonic", "trace"] }
 
 # Serde
 serde = { version = "1", features = ["derive"] }

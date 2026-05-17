@@ -70,6 +70,7 @@ impl LiveStateEngine {
     /// in-memory node (if present). Returns the updated `Node` for
     /// the caller (HTTP handler) to send back as the response. An
     /// empty `label` removes the persisted entry.
+    #[tracing::instrument(skip(self), fields(node = %id.0))]
     pub fn set_node_label(&self, id: &NodeId, label: &str) -> anyhow::Result<Option<Node>> {
         if let Some(store) = &self.topology_store {
             store.set_node_label(id, label)?;
@@ -88,6 +89,7 @@ impl LiveStateEngine {
 
     /// Persist a user-dragged position for `id` and apply it to the
     /// in-memory node (if present).
+    #[tracing::instrument(skip(self), fields(node = %id.0))]
     pub fn set_node_position(
         &self,
         id: &NodeId,
@@ -118,6 +120,7 @@ impl LiveStateEngine {
     /// the flow ended on the exporter. Eviction is about "what
     /// disappeared from our view", and exporter clock skew shouldn't
     /// drive that decision.
+    #[tracing::instrument(skip(self), fields(src = %flow.src.ip, dst = %flow.dst.ip, bytes = flow.bytes))]
     pub fn ingest(&self, flow: &Flow) {
         let now = SystemTime::now();
         let mut emitted: Vec<Delta> = Vec::with_capacity(3);
@@ -220,6 +223,7 @@ impl LiveStateEngine {
     /// Build a wire-format snapshot of current state. Decays edge
     /// rates first so an edge that stopped sending shows its true
     /// (lower) current rate, not its peak.
+    #[tracing::instrument(skip(self))]
     pub fn snapshot(&self) -> Snapshot {
         let now = SystemTime::now();
         let mut state = self.inner.write().expect("engine state poisoned");
@@ -240,6 +244,7 @@ impl LiveStateEngine {
     /// any nodes that no longer participate in any edge AND whose own
     /// `last_seen` is past the threshold. Emits removal deltas for
     /// every dropped entity.
+    #[tracing::instrument(skip(self), fields(max_age_secs = max_age.as_secs()))]
     pub fn evict_stale(&self, max_age: Duration) -> usize {
         let cutoff = SystemTime::now()
             .checked_sub(max_age)
