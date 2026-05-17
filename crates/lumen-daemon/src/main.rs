@@ -91,6 +91,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Outbound webhook consumer for detection events. Opt-in via
+    // LUMEN_DETECTION_WEBHOOK_URL — set to a Slack/Discord/n8n/HA
+    // incoming webhook to push every detection there.
+    if let Ok(url) = std::env::var("LUMEN_DETECTION_WEBHOOK_URL") {
+        let url = url.trim().to_string();
+        if !url.is_empty() {
+            integrations::webhook::spawn(url, detections.clone());
+        }
+    }
+
     // UniFi integration: opt-in via UDM_URL + UDM_API_KEY. Auto-
     // labels nodes whose IPs the controller knows about.
     if let (Ok(url), Ok(key)) = (std::env::var("UDM_URL"), std::env::var("UDM_API_KEY")) {

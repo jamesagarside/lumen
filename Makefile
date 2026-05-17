@@ -15,8 +15,10 @@ help:
 	@echo "    make dev-ui           Run just the UI (terminal B)"
 	@echo ""
 	@echo "  Smoke test:"
-	@echo "    make demo             Send a single packet of synthetic flows"
-	@echo "    make demo-stream      Continuously stream realistic flows"
+	@echo "    make demo                  Send a single packet of synthetic flows"
+	@echo "    make demo-stream           Continuously stream realistic flows"
+	@echo "    make demo-events           Push a batch of synthetic detections"
+	@echo "    make demo-events-stream    Continuously stream synthetic detections"
 	@echo ""
 	@echo "  Validate:"
 	@echo "    make test             cargo test + tsc --noEmit"
@@ -60,6 +62,15 @@ demo:
 # Stream continuously at ~5 packets/sec for realistic-looking traffic.
 demo-stream:
 	python3 scripts/send_netflow.py 2055 stream
+
+# Push a batch of synthetic detection events (lights up the sidebar
+# and node halos with realistic Suricata/UniFi-flavoured alerts).
+demo-events:
+	python3 scripts/post_events.py --count 8
+
+# Continuously stream detections at ~1 per 4s.
+demo-events-stream:
+	python3 scripts/post_events.py --stream
 
 # ─── Validate ────────────────────────────────────────────────────────────────
 

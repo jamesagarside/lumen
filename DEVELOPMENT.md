@@ -149,6 +149,7 @@ All operational config is via environment variables (per `CONTEXT.md` §15):
 | `LUMEN_INITIAL_ADMIN_PASSWORD` | (unset) | First-run admin password. After the admin exists this is ignored. |
 | `UDM_URL` | (unset) | UniFi Network Integration API URL, e.g. `https://192.168.0.1/proxy/network/integration/v1/sites`. Set both this and `UDM_API_KEY` to auto-label devices from the controller. |
 | `UDM_API_KEY` | (unset) | UniFi API key (Settings → Control Plane → Integrations → Create API Key). |
+| `LUMEN_DETECTION_WEBHOOK_URL` | (unset) | If set, every detection event POSTed to `/ingest/events` is forwarded as JSON to this URL — Slack/Discord/n8n/Home Assistant incoming webhooks all work. |
 
 Lumen loads `.env` at startup via `dotenvy` — copy `.env.example` to `.env` and fill in the values for local dev.
 
