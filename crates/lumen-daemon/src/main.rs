@@ -9,7 +9,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
-use crate::ingest::{udp_listener, FlowBus};
+use crate::ingest::{syslog, udp_listener, FlowBus};
 use crate::routes::AppState;
 use crate::state::LiveStateEngine;
 use crate::topology_store::TopologyStore;
@@ -61,6 +61,15 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             if let Err(e) = udp_listener::run(addr, bus).await {
                 error!(listener = "netflow", error = %e, "ingest listener exited");
+            }
+        });
+    }
+
+    if let Some(addr) = config.syslog_listen {
+        let bus = bus.clone();
+        tokio::spawn(async move {
+            if let Err(e) = syslog::run(addr, bus).await {
+                error!(listener = "syslog", error = %e, "ingest listener exited");
             }
         });
     }
@@ -184,6 +193,7 @@ mod tests {
             eviction_interval: std::time::Duration::from_secs(30),
             data_dir: std::path::PathBuf::from("./data"),
             ingest_api_key: None,
+            syslog_listen: None,
         }
     }
 

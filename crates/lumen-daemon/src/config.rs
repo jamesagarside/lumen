@@ -19,6 +19,11 @@ pub struct Config {
     /// Unset = open ingestion (fine on localhost or trusted networks;
     /// not recommended on the open internet).
     pub ingest_api_key: Option<String>,
+    /// Optional syslog listener for iptables-LOG style messages
+    /// (UniFi UDM-Pro, OPNsense, pfSense, vanilla netfilter). Off
+    /// by default — opt in with LUMEN_SYSLOG_LISTEN=0.0.0.0:5514
+    /// (or :514 if the daemon has CAP_NET_BIND_SERVICE / root).
+    pub syslog_listen: Option<SocketAddr>,
 }
 
 impl Config {
@@ -35,13 +40,12 @@ impl Config {
 
         // Three cases: unset → default; "off" → None (disabled);
         // anything else → must parse as a socket address.
-        let netflow_v5_listen = match std::env::var("LUMEN_NETFLOW_V5_LISTEN") {
-            Err(_) => Some("0.0.0.0:2055".parse().unwrap()),
-            Ok(v) if v.is_empty() || v == "off" => None,
-            Ok(v) => Some(v.parse().with_context(|| {
-                format!("LUMEN_NETFLOW_V5_LISTEN={v} is not a valid socket address")
-            })?),
-        };
+        let netflow_v5_listen = parse_optional_listen("LUMEN_NETFLOW_V5_LISTEN")?
+            .unwrap_or_else(|| Some("0.0.0.0:2055".parse().unwrap()));
+
+        // Syslog is off by default (UniFi etc. need explicit opt-in
+        // since :514 is privileged on Linux; use 5514 on macOS/dev).
+        let syslog_listen = parse_optional_listen("LUMEN_SYSLOG_LISTEN")?.flatten();
 
         let edge_max_age = parse_duration_secs("LUMEN_EDGE_MAX_AGE_SECS", 300)?;
         let eviction_interval = parse_duration_secs("LUMEN_EVICTION_INTERVAL_SECS", 30)?;
@@ -62,7 +66,25 @@ impl Config {
             eviction_interval,
             data_dir,
             ingest_api_key,
+            syslog_listen,
         })
+    }
+}
+
+/// Parse an "optional socket address" env var.
+///
+/// Returns:
+/// - `Ok(None)` if the env var is unset (caller decides default)
+/// - `Ok(Some(None))` if explicitly set to "off" or "" (disable)
+/// - `Ok(Some(Some(addr)))` if set to a valid socket address
+/// - `Err(_)` if set to an invalid value
+fn parse_optional_listen(env_var: &str) -> Result<Option<Option<SocketAddr>>> {
+    match std::env::var(env_var) {
+        Err(_) => Ok(None),
+        Ok(v) if v.is_empty() || v == "off" => Ok(Some(None)),
+        Ok(v) => Ok(Some(Some(v.parse().with_context(|| {
+            format!("{env_var}={v} is not a valid socket address")
+        })?))),
     }
 }
 

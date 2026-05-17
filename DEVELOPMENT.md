@@ -134,7 +134,8 @@ All operational config is via environment variables (per `CONTEXT.md` §15):
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `LUMEN_HTTP_LISTEN` | `0.0.0.0:3000` | HTTP + WebSocket listen address |
-| `LUMEN_NETFLOW_V5_LISTEN` | `0.0.0.0:2055` | NetFlow v5 UDP listen (`off` to disable) |
+| `LUMEN_NETFLOW_V5_LISTEN` | `0.0.0.0:2055` | NetFlow v5 / v9 / IPFIX UDP listen (`off` to disable) |
+| `LUMEN_SYSLOG_LISTEN` | (off) | Syslog UDP listen for iptables-LOG style messages (UniFi UDM, OPNsense, pfSense). Set to e.g. `0.0.0.0:5514`. |
 | `LUMEN_UI_ASSETS_DIR` | (none) | Static UI directory; set in container, unset in dev |
 | `LUMEN_LOG_FORMAT` | auto (json in container, compact in TTY) | `json` or `compact` |
 | `RUST_LOG` | `info,lumen_daemon=info` | tracing filter; useful: `lumen=debug` |
