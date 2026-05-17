@@ -25,15 +25,17 @@ use crate::state::LiveStateEngine;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// UniFi's documented max page size for the integration API.
+const PAGE_LIMIT: u32 = 200;
 
-/// The shape of a UniFi site response. The Network Integration API
-/// envelopes results in `{ data: [...], offset, limit, count, total }`.
+/// Shape of UniFi's paginated responses: the integration API wraps
+/// list results in `{ data, offset, limit, count, totalCount }`.
+/// We follow pages until we've seen `totalCount` items.
 #[derive(Debug, Deserialize)]
 struct PaginatedEnvelope<T> {
     data: Vec<T>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    total: Option<u32>,
+    #[serde(default, rename = "totalCount", alias = "total")]
+    total_count: Option<u32>,
 }
 
 /// A site within a UniFi controller. The integration API uses these
@@ -122,9 +124,31 @@ impl UnifiClient {
         })
     }
 
+    /// Fetch every page of `base_url`. UniFi's integration API uses
+    /// `offset` + `limit` query params and reports `totalCount` in
+    /// the envelope. Defends against bad servers with a safety cap
+    /// (50 pages * 200 = 10k items) so a misbehaving controller
+    /// can't trap us forever.
+    async fn list_paginated<T: for<'de> Deserialize<'de>>(&self, base_url: &str) -> Result<Vec<T>> {
+        let mut out: Vec<T> = Vec::new();
+        let mut offset: u32 = 0;
+        for _ in 0..50 {
+            let sep = if base_url.contains('?') { '&' } else { '?' };
+            let url = format!("{base_url}{sep}offset={offset}&limit={PAGE_LIMIT}");
+            let env: PaginatedEnvelope<T> = self.get_json(&url).await?;
+            let got = env.data.len();
+            out.extend(env.data);
+            offset += got as u32;
+            let done = env.total_count.is_none_or(|t| out.len() as u32 >= t) || got == 0;
+            if done {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     async fn list_sites(&self) -> Result<Vec<Site>> {
-        let envelope: PaginatedEnvelope<Site> = self.get_json(&self.sites_url).await?;
-        Ok(envelope.data)
+        self.list_paginated(&self.sites_url).await
     }
 
     async fn list_clients(&self, site_id: &str) -> Result<Vec<Client>> {
@@ -135,8 +159,7 @@ impl UnifiClient {
             self.sites_url.trim_end_matches('/'),
             site_id
         );
-        let envelope: PaginatedEnvelope<Client> = self.get_json(&url).await?;
-        Ok(envelope.data)
+        self.list_paginated(&url).await
     }
 }
 
