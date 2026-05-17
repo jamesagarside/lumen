@@ -1,5 +1,7 @@
 use anyhow::Context;
-use axum::routing::{get, patch};
+use std::sync::Arc;
+
+use axum::routing::{get, patch, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -41,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         bus: bus.clone(),
         engine: engine.clone(),
+        ingest_api_key: config.ingest_api_key.as_deref().map(Arc::from),
     };
 
     // Engine consumes flows from the bus and maintains the topology.
@@ -83,6 +86,7 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
         .route("/metrics", get(routes::metrics))
         .route("/snapshot", get(routes::snapshot))
         .route("/nodes/:id", patch(routes::patch_node))
+        .route("/ingest/flows", post(routes::ingest_flows))
         .route("/ws/flows", get(routes::ws_flows))
         .with_state(state);
 
@@ -179,6 +183,7 @@ mod tests {
             edge_max_age: std::time::Duration::from_secs(300),
             eviction_interval: std::time::Duration::from_secs(30),
             data_dir: std::path::PathBuf::from("./data"),
+            ingest_api_key: None,
         }
     }
 
@@ -186,6 +191,7 @@ mod tests {
         AppState {
             bus: FlowBus::new(),
             engine: LiveStateEngine::new(),
+            ingest_api_key: None,
         }
     }
 

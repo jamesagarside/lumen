@@ -50,12 +50,32 @@ make demo
 # equivalent: python3 scripts/send_netflow.py 2055
 ```
 
-Sends one synthetic NetFlow v5 packet containing two flow records. Within a frame you should see them in the UI table and on the SVG diagram.
+Sends one synthetic NetFlow v5 packet containing two flow records. Within a frame you should see them in the UI table and on the graph.
 
 For a continuous stream:
 ```bash
 python3 scripts/send_netflow.py 2055 100  # 100 packets, ~10/sec
+make demo-stream                          # ~5 packets/sec, runs forever
 ```
+
+You can also push flows in directly via HTTP — useful for testing your own collector or piping in data from a non-NetFlow source:
+
+```bash
+curl -X POST http://localhost:3000/ingest/flows \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "source": "json_http",
+    "src": { "ip": "10.0.0.42", "port": 51234 },
+    "dst": { "ip": "1.1.1.1", "port": 443 },
+    "protocol": 6,
+    "bytes": 2048,
+    "packets": 4,
+    "start": { "secs_since_epoch": 1700000000, "nanos_since_epoch": 0 },
+    "end":   { "secs_since_epoch": 1700000001, "nanos_since_epoch": 0 }
+  }]'
+```
+
+Set `LUMEN_INGEST_API_KEY=...` to require an `X-Api-Key` header on the endpoint. Unset = open ingestion (fine on localhost or trusted networks).
 
 ### What you can iterate on
 
@@ -110,6 +130,10 @@ All operational config is via environment variables (per `CONTEXT.md` §15):
 | `LUMEN_UI_ASSETS_DIR` | (none) | Static UI directory; set in container, unset in dev |
 | `LUMEN_LOG_FORMAT` | auto (json in container, compact in TTY) | `json` or `compact` |
 | `RUST_LOG` | `info,lumen_daemon=info` | tracing filter; useful: `lumen=debug` |
+| `LUMEN_DATA_DIR` | `./data` | Where the topology DB lives (and future plugin permissions, etc.) |
+| `LUMEN_EDGE_MAX_AGE_SECS` | `300` | Stale-edge eviction threshold |
+| `LUMEN_EVICTION_INTERVAL_SECS` | `30` | How often the eviction sweep runs |
+| `LUMEN_INGEST_API_KEY` | (unset) | Optional shared secret required by `POST /ingest/flows`. Unset = open ingestion. |
 
 User-facing settings (device labels, plugin config, role assignments, etc.) live in the topology DB, not env vars. See `CONTEXT.md` §11 and §15.
 

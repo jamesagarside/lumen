@@ -1,23 +1,27 @@
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use lumen_core::{Node, NodeId, Position, Snapshot};
+use lumen_core::{Flow, FlowSource, Node, NodeId, Position, Snapshot};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
 
 use crate::ingest::FlowBus;
-use crate::metrics::{self as app_metrics, WS_CLIENTS};
+use crate::metrics::{self as app_metrics, FLOWS_INGESTED, WS_CLIENTS};
 use crate::state::LiveStateEngine;
 
 #[derive(Clone)]
 pub struct AppState {
     pub bus: FlowBus,
     pub engine: LiveStateEngine,
+    /// If `Some`, every POST /ingest/flows must include a matching
+    /// `X-Api-Key` header. If `None`, ingestion is open.
+    pub ingest_api_key: Option<Arc<str>>,
 }
 
 #[derive(Serialize)]
@@ -52,6 +56,52 @@ pub async fn version() -> Json<VersionInfo> {
 /// snapshot+delta WebSocket in #8.
 pub async fn snapshot(State(state): State<AppState>) -> Json<Snapshot> {
     Json(state.engine.snapshot())
+}
+
+#[derive(Serialize)]
+pub struct IngestAccepted {
+    pub accepted: usize,
+}
+
+/// Accept a JSON array of pre-parsed `Flow` records and publish each
+/// onto the bus. The escape hatch for any data source we don't have
+/// a native parser for: eBPF flow generators, custom collectors,
+/// Suricata's eve.json (with a small adapter), etc.
+///
+/// Behaviour:
+/// - If `LUMEN_INGEST_API_KEY` is set, an `X-Api-Key` header that
+///   matches it is required. 401 otherwise.
+/// - Body must be a JSON array of `Flow`. Single objects, NDJSON,
+///   etc. are not supported (use multiple POSTs).
+/// - Each accepted flow's `source` is normalised to
+///   `FlowSource::JsonHttp` so downstream consumers can distinguish
+///   it from native-protocol-parsed flows.
+pub async fn ingest_flows(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(flows): Json<Vec<Flow>>,
+) -> Result<(StatusCode, Json<IngestAccepted>), (StatusCode, Json<ApiError>)> {
+    if let Some(expected) = &state.ingest_api_key {
+        let supplied = headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if supplied != expected.as_ref() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ApiError {
+                    error: "missing or invalid X-Api-Key".to_string(),
+                }),
+            ));
+        }
+    }
+    let accepted = flows.len();
+    for mut f in flows {
+        f.source = FlowSource::JsonHttp;
+        state.bus.publish(f);
+    }
+    metrics::counter!(FLOWS_INGESTED, "protocol" => "json_http").increment(accepted as u64);
+    Ok((StatusCode::ACCEPTED, Json(IngestAccepted { accepted })))
 }
 
 #[derive(Deserialize, Default)]

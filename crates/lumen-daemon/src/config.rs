@@ -15,6 +15,10 @@ pub struct Config {
     pub eviction_interval: Duration,
     /// Persistent state (topology DB, future plugin permissions, etc.)
     pub data_dir: PathBuf,
+    /// Optional shared secret required to POST to /ingest/flows.
+    /// Unset = open ingestion (fine on localhost or trusted networks;
+    /// not recommended on the open internet).
+    pub ingest_api_key: Option<String>,
 }
 
 impl Config {
@@ -39,6 +43,10 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./data"));
 
+        let ingest_api_key = std::env::var("LUMEN_INGEST_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+
         Ok(Self {
             http_listen,
             ui_assets_dir,
@@ -46,6 +54,7 @@ impl Config {
             edge_max_age,
             eviction_interval,
             data_dir,
+            ingest_api_key,
         })
     }
 }
