@@ -2,6 +2,7 @@ import { onCleanup, onMount, createEffect, Show, type Component } from "solid-js
 import Graph from "graphology";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import Sigma from "sigma";
+import AnimatedEdgeProgram from "./edgePrograms/animatedEdge";
 import GraphEmptyState from "./GraphEmptyState";
 import {
   graphAnchor,
@@ -62,6 +63,13 @@ const SigmaGraph: Component<Props> = (props) => {
     sigma = new Sigma(graph, container, {
       defaultNodeColor: COLOR_INTERNAL,
       defaultEdgeColor: "rgba(251, 191, 36, 0.4)",
+      // Animated dashed edges (#25) replace Sigma's stock straight lines.
+      // Programs are keyed by name; `defaultEdgeType` decides which one
+      // the renderer picks when an edge has no explicit `type` attribute.
+      edgeProgramClasses: {
+        animated: AnimatedEdgeProgram,
+      },
+      defaultEdgeType: "animated",
       labelColor: { color: "#a1a1aa" }, // zinc-400
       labelFont: "ui-monospace, SFMono-Regular, Menlo, monospace",
       labelSize: 11,
@@ -240,9 +248,23 @@ const SigmaGraph: Component<Props> = (props) => {
     sigma.getMouseCaptor().on("mouseleave", finishDrag);
   };
 
-  onMount(() => ensureSigma());
+  // requestAnimationFrame loop that nudges Sigma to re-render each frame
+  // so the animated-edge shader's `u_time` uniform actually advances.
+  // `scheduleRender` re-uses cached vertex buffers — it doesn't re-walk
+  // the graph or recompute edge data, so this is cheap.
+  let rafHandle = 0;
+  const tick = () => {
+    sigma?.scheduleRender();
+    rafHandle = requestAnimationFrame(tick);
+  };
+
+  onMount(() => {
+    ensureSigma();
+    rafHandle = requestAnimationFrame(tick);
+  });
 
   onCleanup(() => {
+    if (rafHandle) cancelAnimationFrame(rafHandle);
     sigma?.kill();
     sigma = null;
     graph = null;
@@ -433,22 +455,31 @@ function applySnapshot(graph: Graph, snap: Snapshot): Set<string> {
 
   // Edges: add new ones, update sizes/colors for existing. Intensity
   // scales by sqrt so a 10× bandwidth difference shows as ~3× stroke.
+  //
+  // The animated-edge program (#25) reads `intensity` directly to drive
+  // dash speed + brightness — colour stays a single-hue amber until
+  // application categories land with DPI (#29). Idle edges get a
+  // baseline intensity so the static line is always visible.
   const maxRate = Math.max(1, ...snap.edges.map((e) => e.bytes_per_sec));
   for (const e of snap.edges) {
     const key = `${e.id.src}->${e.id.dst}`;
     const rateRatio = e.bytes_per_sec / maxRate;
     const intensity = Math.max(0.08, Math.sqrt(rateRatio));
     const size = 0.4 + intensity * 2.5;
-    const color = `rgba(251, 191, 36, ${intensity * 0.85})`;
+    // Solid amber — the shader handles fade-in/out. Use a hex literal so
+    // the program's fast-path colour parser stays on the cached path.
+    const color = "#fbbf24";
     if (graph.hasEdge(key)) {
       graph.setEdgeAttribute(key, "size", size);
       graph.setEdgeAttribute(key, "color", color);
       graph.setEdgeAttribute(key, "weight", e.bytes_per_sec);
+      graph.setEdgeAttribute(key, "intensity", intensity);
     } else if (graph.hasNode(e.id.src) && graph.hasNode(e.id.dst)) {
       graph.addEdgeWithKey(key, e.id.src, e.id.dst, {
         size,
         color,
         weight: e.bytes_per_sec,
+        intensity,
       });
     }
   }
