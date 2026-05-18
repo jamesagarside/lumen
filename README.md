@@ -106,9 +106,9 @@ Full dev guide: [DEVELOPMENT.md](./DEVELOPMENT.md).
 
 ### Admin
 
-- **Settings store** with encrypted-at-rest secrets — admins manage integration credentials (UniFi labels, UniFi IPS, outbound webhook) from the UI, no `.env` editing or restart required. Changes take effect within a poll cycle.
-- **ChaCha20-Poly1305 AEAD** with a 32-byte master key (auto-generated at `data/master.key`, `0600`; or `LUMEN_MASTER_KEY` env for container deploys). Per-secret random nonces; versioned envelope for future rotation.
-- **Env-var fallback** — existing `.env`-configured deployments keep working after upgrade. Save once via the UI, delete the env var. DB wins when both are set.
+- **Settings page** (⚙ in the header) — admins manage integration credentials (UniFi labels, UniFi IPS, outbound webhook) from the UI, no `.env` editing or restart required. Save / Clear per integration; live status badges (`running`, `stopped`, `not configured`, `from .env`).
+- **Encrypted-at-rest secrets** via ChaCha20-Poly1305 AEAD with a 32-byte master key (auto-generated at `data/master.key`, `0600`; or `LUMEN_MASTER_KEY` env for container deploys). Per-secret random nonces; versioned envelope for future rotation.
+- **Env-var fallback** — existing `.env`-configured deployments keep working after upgrade. Env-sourced fields render read-only in the UI with a `from .env` badge. Save once via the UI, delete the env var. DB wins when both are set.
 
 ## Architecture
 

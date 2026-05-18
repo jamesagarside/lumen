@@ -18,6 +18,7 @@ export default defineConfig({
       "/events": "http://localhost:3000",
       "/ingest": "http://localhost:3000",
       "/auth": "http://localhost:3000",
+      "/admin": "http://localhost:3000",
       "/metrics": "http://localhost:3000",
       "/ws/flows": {
         target: "ws://localhost:3000",

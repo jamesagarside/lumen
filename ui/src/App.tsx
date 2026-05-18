@@ -8,6 +8,7 @@ import {
   Switch,
   type Component,
 } from "solid-js";
+import AdminSettings from "./AdminSettings";
 import DaemonBanner from "./DaemonBanner";
 import EventsSidebar from "./EventsSidebar";
 import FlowTable from "./FlowTable";
@@ -102,6 +103,7 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
   const [relayoutTick, setRelayoutTick] = createSignal(0);
   const [pane, setPane] = createSignal<RightPane>("flows");
   const [view, setView] = createSignal<ViewKind>("graph");
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
 
   // Cmd/Ctrl-1/2/3 shortcuts for view switching. Mounted on
   // window so they fire regardless of focus, except when the user
@@ -183,6 +185,16 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
           <ConnectionPill state={flowStore.connection()} />
             <div class="flex items-center gap-2 text-[10px] text-zinc-500 border-l border-zinc-800 pl-3 ml-1">
               <span title={props.userEmail}>{props.userEmail.split("@")[0]}</span>
+              <Show when={props.can("manage_settings")}>
+                <button
+                  type="button"
+                  class="text-zinc-500 hover:text-amber-300"
+                  onClick={() => setSettingsOpen(true)}
+                  title="settings"
+                >
+                  ⚙
+                </button>
+              </Show>
               <button
                 type="button"
                 class="text-zinc-500 hover:text-zinc-300"
@@ -267,6 +279,9 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
         </section>
         </Show>
       </div>
+      <Show when={settingsOpen()}>
+        <AdminSettings onClose={() => setSettingsOpen(false)} />
+      </Show>
     </main>
   );
 };
