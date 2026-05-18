@@ -9,6 +9,7 @@ import {
   type Component,
 } from "solid-js";
 import AdminSettings from "./AdminSettings";
+import CommandPalette from "./CommandPalette";
 import DaemonBanner from "./DaemonBanner";
 import EventsSidebar from "./EventsSidebar";
 import FlowTable from "./FlowTable";
@@ -107,6 +108,7 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
   const [pane, setPane] = createSignal<RightPane>("flows");
   const [view, setView] = createSignal<ViewKind>("graph");
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [paletteOpen, setPaletteOpen] = createSignal(false);
 
   // While scrubbed back in time, the inspector + graph read from the
   // historical reconstruction instead of the live snapshot poll. Live
@@ -114,13 +116,21 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
   const effectiveSnapshot = () =>
     scrubStore.isLive() ? snapshotStore.snapshot() : scrubStore.scrubbedSnapshot();
 
-  // Cmd/Ctrl-1/2/3 shortcuts for view switching. Mounted on
-  // window so they fire regardless of focus, except when the user
-  // is typing in an input (label edit, search box).
+  // Cmd/Ctrl-1/2/3 switch views, Cmd/Ctrl-K opens the quick-open palette.
+  // Mounted on window so shortcuts fire regardless of focus — except when
+  // the user is typing into a text input (label edit, search box), in
+  // which case we get out of the way. Cmd-K is allowed inside inputs so
+  // you can always re-open it.
   const onKey = (e: KeyboardEvent) => {
     if (!(e.metaKey || e.ctrlKey)) return;
     const target = e.target as HTMLElement | null;
-    if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
+    const inEditor = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA";
+    if (e.key === "k" || e.key === "K") {
+      e.preventDefault();
+      setPaletteOpen((o) => !o);
+      return;
+    }
+    if (inEditor) return;
     const view = ({ "1": "graph", "2": "vlan", "3": "architecture" } as const)[e.key];
     if (view) {
       e.preventDefault();
@@ -300,6 +310,12 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
       <Show when={settingsOpen()}>
         <AdminSettings onClose={() => setSettingsOpen(false)} />
       </Show>
+      <CommandPalette
+        open={paletteOpen()}
+        snapshot={snapshotStore.snapshot()}
+        onSelect={(id) => setSelectedNode(id)}
+        onClose={() => setPaletteOpen(false)}
+      />
     </main>
   );
 };
