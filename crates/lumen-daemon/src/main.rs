@@ -451,11 +451,7 @@ mod tests {
     /// Establish an Admin user, log in, return (router, session cookie,
     /// env-lock guard). The guard must be bound for the test's full body
     /// — siblings touching the same env vars take the same lock.
-    async fn admin_session() -> (
-        AppState,
-        String,
-        std::sync::MutexGuard<'static, ()>,
-    ) {
+    async fn admin_session() -> (AppState, String, std::sync::MutexGuard<'static, ()>) {
         let guard = crate::test_env::clear_env();
         let state = test_state();
         state
