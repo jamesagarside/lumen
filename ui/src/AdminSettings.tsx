@@ -2,6 +2,7 @@ import {
   createMemo,
   createSignal,
   For,
+  Index,
   Match,
   onMount,
   Show,
@@ -14,31 +15,46 @@ import {
   type IntegrationDiagnostic,
   type IntegrationId,
   type IntegrationStatus,
+  type OidcGroupMapping,
+  type UserRole,
 } from "./settingsStore";
+import {
+  createUserAdminStore,
+  type RoleInfo,
+  type UserDetail,
+} from "./userAdminStore";
 
 interface AdminSettingsProps {
   onClose: () => void;
 }
 
-/// Admin → Settings overlay. Sidebar layout: left rail lists every
+/// Stable id for every section the admin panel can show. Three kinds:
+///   - `IntegrationId` for things `/admin/settings` knows about (incl. OIDC)
+///   - `"users"` for the Users admin section (`/admin/users` API)
+///   - `"roles"` for the read-only role/capability matrix
+type SectionId = IntegrationId | "users" | "roles";
+
+/// Admin overlay shell. Sidebar layout: left rail lists every
 /// admin-managed thing (grouped by category), right pane shows the
-/// selected entry's form + a diagnostics panel. Designed so adding a
-/// new integration is "add an entry to the sidebar registry" — the
-/// shell doesn't need to change.
+/// selected entry's form. Adding a new section means: append to
+/// `SIDEBAR_GROUPS`, widen `SectionId`, add a `<Match>` clause below.
 const AdminSettings: Component<AdminSettingsProps> = (props) => {
   const store = createSettingsStore();
-  const [selected, setSelected] = createSignal<IntegrationId>("unifi_labels");
+  const userAdmin = createUserAdminStore();
+  const [selected, setSelected] = createSignal<SectionId>("users");
 
   onMount(() => {
     void store.refresh();
+    void userAdmin.refresh();
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") props.onClose();
     };
     window.addEventListener("keydown", handler);
-    // Refresh status every 5s so diagnostics stay live without the
-    // user having to re-save. 5s lines up nicely with the slowest
-    // integration's poll interval (UniFi labels = 60s; UniFi IPS =
-    // 30s) while keeping the panel feeling alive.
+    // Refresh integration status every 5s so diagnostics stay live
+    // without the user having to re-save. 5s lines up nicely with the
+    // slowest integration's poll interval (UniFi labels = 60s; UniFi
+    // IPS = 30s) while keeping the panel feeling alive. The user
+    // admin endpoint isn't polled — it only changes via the form.
     const poll = window.setInterval(() => void store.refresh(), 5000);
     return () => {
       window.removeEventListener("keydown", handler);
@@ -90,6 +106,12 @@ const AdminSettings: Component<AdminSettingsProps> = (props) => {
           />
           <main class="flex-1 min-h-0 overflow-y-auto px-6 py-5">
             <Switch>
+              <Match when={selected() === "users"}>
+                <UsersSection store={userAdmin} />
+              </Match>
+              <Match when={selected() === "roles"}>
+                <RolesSection store={userAdmin} />
+              </Match>
               <Match when={store.loading() && !store.statuses()}>
                 <p class="text-[10px] text-zinc-600">loading…</p>
               </Match>
@@ -114,6 +136,13 @@ const AdminSettings: Component<AdminSettingsProps> = (props) => {
                   onClear={() => store.clear("webhook")}
                 />
               </Match>
+              <Match when={store.statuses() && selected() === "oidc"}>
+                <OidcSection
+                  status={byId("oidc")}
+                  onSave={store.saveOidc}
+                  onClear={() => store.clear("oidc")}
+                />
+              </Match>
             </Switch>
           </main>
         </div>
@@ -132,10 +161,13 @@ const AdminSettings: Component<AdminSettingsProps> = (props) => {
 // ── Sidebar ──────────────────────────────────────────────────────────────────
 
 interface SidebarEntry {
-  id: IntegrationId;
+  id: SectionId;
   label: string;
   /** Free-form short tag rendered under the label, e.g. "UniFi · labels". */
   badge: string;
+  /** True for non-integration entries (Users, Roles) — these skip the
+   * integration-status dot lookup and use their own indicator. */
+  isMeta?: boolean;
 }
 
 interface SidebarGroup {
@@ -145,10 +177,25 @@ interface SidebarGroup {
   hint?: string;
 }
 
-/// The single place to register new integrations / settings pages.
-/// Adding a section is two changes: append an entry here and add a
-/// <Match> in the main shell above.
+/// The single place to register new sections. Adding one is two
+/// changes: append an entry here and a `<Match>` clause in the shell
+/// above.
 const SIDEBAR_GROUPS: SidebarGroup[] = [
+  {
+    title: "Access",
+    hint: "Who can sign in and what they can do.",
+    entries: [
+      { id: "users", label: "Users", badge: "Local accounts", isMeta: true },
+      { id: "roles", label: "Roles & capabilities", badge: "Reference", isMeta: true },
+    ],
+  },
+  {
+    title: "Authentication",
+    hint: "Single sign-on and identity provider integration.",
+    entries: [
+      { id: "oidc", label: "OIDC / SSO", badge: "Identity provider" },
+    ],
+  },
   {
     title: "Integrations",
     hint: "Read from / write to third-party systems.",
@@ -158,17 +205,15 @@ const SIDEBAR_GROUPS: SidebarGroup[] = [
       { id: "webhook", label: "Detection webhook", badge: "Outbound · notifications" },
     ],
   },
-  // Future groups land here without code changes to the shell:
-  //   { title: "Platform", entries: [{ id: "master_key", ... }] }
-  //   { title: "Users",    entries: [{ id: "users", ... }] }
 ];
 
 const Sidebar: Component<{
   statuses: IntegrationStatus[] | null;
-  selected: IntegrationId;
-  onSelect: (id: IntegrationId) => void;
+  selected: SectionId;
+  onSelect: (id: SectionId) => void;
 }> = (props) => {
-  const findStatus = (id: IntegrationId) => props.statuses?.find((s) => s.id === id);
+  const findStatus = (id: SectionId) =>
+    props.statuses?.find((s) => s.id === (id as IntegrationId));
 
   return (
     <nav class="w-56 border-r border-zinc-800/80 px-3 py-4 flex-shrink-0 overflow-y-auto">
@@ -186,7 +231,7 @@ const Sidebar: Component<{
                 {(entry) => (
                   <SidebarItem
                     entry={entry}
-                    status={findStatus(entry.id)}
+                    status={entry.isMeta ? undefined : findStatus(entry.id)}
                     active={props.selected === entry.id}
                     onSelect={() => props.onSelect(entry.id)}
                   />
@@ -207,6 +252,7 @@ const SidebarItem: Component<{
   onSelect: () => void;
 }> = (props) => {
   const dotClass = () => {
+    if (props.entry.isMeta) return "bg-zinc-600";
     const s = props.status;
     if (!s) return "bg-zinc-700";
     if (s.running) return "bg-emerald-400";
@@ -711,6 +757,615 @@ const WebhookSection: Component<{
           saving={saving()}
           envLocked={envLocked()}
           canClear={!!props.status?.plain_source}
+          onClear={() => void clear()}
+        />
+      </form>
+    </Section>
+  );
+};
+
+// ── Users ────────────────────────────────────────────────────────────────────
+
+const ROLE_OPTIONS: UserRole[] = ["admin", "operator", "viewer", "noc_display"];
+
+const roleLabel = (id: UserRole, roles: RoleInfo[] | null | undefined): string =>
+  roles?.find((r) => r.id === id)?.label ?? id;
+
+const UsersSection: Component<{ store: ReturnType<typeof createUserAdminStore> }> = (
+  props,
+) => {
+  const [showCreate, setShowCreate] = createSignal(false);
+  const [editing, setEditing] = createSignal<UserDetail | null>(null);
+
+  return (
+    <section class="space-y-4">
+      <header class="flex items-start justify-between gap-4">
+        <div>
+          <h3 class="text-sm font-semibold text-zinc-100">Users</h3>
+          <p class="text-[10px] text-zinc-500 mt-1 max-w-prose">
+            Local accounts. Roles bundle capabilities — see Roles &amp; capabilities for
+            the matrix. Use OIDC to delegate authentication to an upstream IdP.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="text-[10px] uppercase tracking-wider px-3 py-1.5 bg-amber-500/20 text-amber-200 border border-amber-700/50 rounded hover:bg-amber-500/30"
+          onClick={() => setShowCreate(true)}
+        >
+          + New user
+        </button>
+      </header>
+
+      <Show when={props.store.error()}>
+        {(err) => (
+          <div class="px-3 py-2 text-[11px] text-rose-300 bg-rose-950/40 border border-rose-900/60 rounded">
+            {err()}
+          </div>
+        )}
+      </Show>
+
+      <Show
+        when={props.store.users() && props.store.users()!.length > 0}
+        fallback={<p class="text-[10px] text-zinc-600">no users yet</p>}
+      >
+        <div class="border border-zinc-800/60 rounded overflow-hidden">
+          <table class="w-full text-[11px]">
+            <thead class="bg-zinc-900/50 text-[9px] uppercase tracking-wider text-zinc-500">
+              <tr>
+                <th class="text-left px-3 py-2 font-normal">Email</th>
+                <th class="text-left px-3 py-2 font-normal">Role</th>
+                <th class="text-left px-3 py-2 font-normal">Created</th>
+                <th class="text-right px-3 py-2 font-normal w-20" />
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-zinc-800/60">
+              <For each={props.store.users()!}>
+                {(u) => (
+                  <tr class="text-zinc-200 hover:bg-zinc-900/40">
+                    <td class="px-3 py-2 font-mono truncate max-w-xs" title={u.email}>
+                      {u.email}
+                    </td>
+                    <td class="px-3 py-2 text-zinc-400">
+                      {roleLabel(u.role, props.store.roles()?.roles)}
+                    </td>
+                    <td class="px-3 py-2 text-zinc-500 tabular-nums">
+                      {new Date(u.created_at_secs * 1000).toISOString().slice(0, 10)}
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        class="text-[10px] text-zinc-500 hover:text-amber-300 px-2 py-0.5"
+                        onClick={() => setEditing(u)}
+                      >
+                        edit
+                      </button>
+                    </td>
+                  </tr>
+                )}
+              </For>
+            </tbody>
+          </table>
+        </div>
+      </Show>
+
+      <Show when={showCreate()}>
+        <CreateUserModal
+          roles={props.store.roles()?.roles ?? []}
+          onClose={() => setShowCreate(false)}
+          onSubmit={async (p) => {
+            await props.store.create(p);
+            setShowCreate(false);
+          }}
+        />
+      </Show>
+
+      <Show when={editing()}>
+        {(u) => (
+          <EditUserModal
+            user={u()}
+            roles={props.store.roles()?.roles ?? []}
+            onClose={() => setEditing(null)}
+            onSubmit={async (p) => {
+              await props.store.update(u().id, p);
+              setEditing(null);
+            }}
+            onDelete={async () => {
+              if (
+                !confirm(
+                  `Delete user ${u().email}? Their active sessions will be revoked immediately.`,
+                )
+              )
+                return;
+              await props.store.remove(u().id);
+              setEditing(null);
+            }}
+          />
+        )}
+      </Show>
+    </section>
+  );
+};
+
+const Modal: Component<{ title: string; onClose: () => void; children: JSX.Element }> = (
+  props,
+) => (
+  <div
+    class="fixed inset-0 z-[60] bg-zinc-950/85 backdrop-blur-sm flex items-center justify-center px-4"
+    onClick={(e) => {
+      if (e.target === e.currentTarget) props.onClose();
+    }}
+  >
+    <div class="w-full max-w-md bg-zinc-950 border border-zinc-800 rounded-md shadow-2xl">
+      <header class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+        <h4 class="text-[11px] font-semibold tracking-tight text-zinc-100">{props.title}</h4>
+        <button
+          type="button"
+          onClick={props.onClose}
+          class="text-zinc-500 hover:text-zinc-200 text-sm px-2 py-0.5"
+        >
+          ✕
+        </button>
+      </header>
+      <div class="px-5 py-4">{props.children}</div>
+    </div>
+  </div>
+);
+
+const CreateUserModal: Component<{
+  roles: RoleInfo[];
+  onClose: () => void;
+  onSubmit: (p: { email: string; password: string; role: UserRole }) => Promise<void>;
+}> = (props) => {
+  const [email, setEmail] = createSignal("");
+  const [password, setPassword] = createSignal("");
+  const [role, setRole] = createSignal<UserRole>("viewer");
+  const [saving, setSaving] = createSignal(false);
+  const [err, setErr] = createSignal<string | null>(null);
+
+  const submit = async (e: SubmitEvent) => {
+    e.preventDefault();
+    setErr(null);
+    setSaving(true);
+    try {
+      await props.onSubmit({ email: email().trim(), password: password(), role: role() });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal title="New user" onClose={props.onClose}>
+      <form onSubmit={submit} class="space-y-3">
+        <Field label="Email">
+          <input
+            class={inputClass}
+            type="email"
+            value={email()}
+            onInput={(e) => setEmail(e.currentTarget.value)}
+            placeholder="alice@example.com"
+            required
+            autofocus
+          />
+        </Field>
+        <Field label="Initial password" hint="≥ 8 characters. Share out-of-band; the user changes it on next sign-in.">
+          <input
+            class={inputClass}
+            type="password"
+            value={password()}
+            onInput={(e) => setPassword(e.currentTarget.value)}
+            autocomplete="new-password"
+            minLength={8}
+            required
+          />
+        </Field>
+        <Field label="Role">
+          <RoleSelect value={role()} onChange={setRole} roles={props.roles} />
+        </Field>
+        <Show when={err()}>
+          {(e) => <p class="text-[10px] text-rose-300">{e()}</p>}
+        </Show>
+        <div class="flex justify-end gap-2 pt-2">
+          <button
+            type="button"
+            class="text-[10px] uppercase tracking-wider px-3 py-1.5 text-zinc-500 hover:text-zinc-300 border border-zinc-800 rounded"
+            onClick={props.onClose}
+          >
+            cancel
+          </button>
+          <button
+            type="submit"
+            class="text-[10px] uppercase tracking-wider px-3 py-1.5 bg-amber-500/20 text-amber-200 border border-amber-700/50 rounded hover:bg-amber-500/30 disabled:opacity-40"
+            disabled={saving()}
+          >
+            {saving() ? "creating…" : "create"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+};
+
+const EditUserModal: Component<{
+  user: UserDetail;
+  roles: RoleInfo[];
+  onClose: () => void;
+  onSubmit: (p: { role?: UserRole; password?: string }) => Promise<void>;
+  onDelete: () => Promise<void>;
+}> = (props) => {
+  const [role, setRole] = createSignal<UserRole>(props.user.role);
+  const [password, setPassword] = createSignal("");
+  const [saving, setSaving] = createSignal(false);
+  const [err, setErr] = createSignal<string | null>(null);
+
+  const submit = async (e: SubmitEvent) => {
+    e.preventDefault();
+    setErr(null);
+    const patch: { role?: UserRole; password?: string } = {};
+    if (role() !== props.user.role) patch.role = role();
+    if (password()) patch.password = password();
+    if (Object.keys(patch).length === 0) {
+      setErr("nothing to change");
+      return;
+    }
+    setSaving(true);
+    try {
+      await props.onSubmit(patch);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal title={`Edit ${props.user.email}`} onClose={props.onClose}>
+      <form onSubmit={submit} class="space-y-3">
+        <Field label="Role">
+          <RoleSelect value={role()} onChange={setRole} roles={props.roles} />
+        </Field>
+        <Field
+          label="Reset password"
+          hint="Leave blank to keep the current password. Setting one revokes every active session for this user."
+        >
+          <input
+            class={inputClass}
+            type="password"
+            value={password()}
+            onInput={(e) => setPassword(e.currentTarget.value)}
+            autocomplete="new-password"
+            placeholder="(leave blank to keep)"
+          />
+        </Field>
+        <Show when={err()}>
+          {(e) => <p class="text-[10px] text-rose-300">{e()}</p>}
+        </Show>
+        <div class="flex items-center justify-between gap-2 pt-2">
+          <button
+            type="button"
+            class="text-[10px] uppercase tracking-wider px-3 py-1.5 text-zinc-500 hover:text-rose-400 border border-zinc-800 hover:border-rose-900 rounded"
+            onClick={() => void props.onDelete()}
+          >
+            delete
+          </button>
+          <div class="flex gap-2">
+            <button
+              type="button"
+              class="text-[10px] uppercase tracking-wider px-3 py-1.5 text-zinc-500 hover:text-zinc-300 border border-zinc-800 rounded"
+              onClick={props.onClose}
+            >
+              cancel
+            </button>
+            <button
+              type="submit"
+              class="text-[10px] uppercase tracking-wider px-3 py-1.5 bg-amber-500/20 text-amber-200 border border-amber-700/50 rounded hover:bg-amber-500/30 disabled:opacity-40"
+              disabled={saving()}
+            >
+              {saving() ? "saving…" : "save"}
+            </button>
+          </div>
+        </div>
+      </form>
+    </Modal>
+  );
+};
+
+const RoleSelect: Component<{
+  value: UserRole;
+  onChange: (r: UserRole) => void;
+  roles: RoleInfo[];
+}> = (props) => (
+  <select
+    class={inputClass}
+    value={props.value}
+    onChange={(e) => props.onChange(e.currentTarget.value as UserRole)}
+  >
+    <For each={ROLE_OPTIONS}>
+      {(id) => <option value={id}>{roleLabel(id, props.roles)}</option>}
+    </For>
+  </select>
+);
+
+// ── Roles & capabilities (read-only matrix) ──────────────────────────────────
+
+const RolesSection: Component<{ store: ReturnType<typeof createUserAdminStore> }> = (
+  props,
+) => {
+  const data = () => props.store.roles();
+
+  return (
+    <section class="space-y-4">
+      <header>
+        <h3 class="text-sm font-semibold text-zinc-100">Roles &amp; capabilities</h3>
+        <p class="text-[10px] text-zinc-500 mt-1 max-w-prose">
+          Each user has exactly one role. Roles bundle capabilities — the granular
+          permissions checked at every gated endpoint. Custom roles aren&apos;t
+          configurable yet; the four bundled roles cover the v1 use cases.
+        </p>
+      </header>
+
+      <Show when={data()} fallback={<p class="text-[10px] text-zinc-600">loading…</p>}>
+        {(d) => (
+          <div class="space-y-5">
+            <div class="border border-zinc-800/60 rounded overflow-x-auto">
+              <table class="w-full text-[11px]">
+                <thead class="bg-zinc-900/50 text-[9px] uppercase tracking-wider text-zinc-500">
+                  <tr>
+                    <th class="text-left px-3 py-2 font-normal sticky left-0 bg-zinc-900/50">
+                      Capability
+                    </th>
+                    <For each={d().roles}>
+                      {(r) => (
+                        <th
+                          class="text-center px-3 py-2 font-normal whitespace-nowrap"
+                          title={r.description}
+                        >
+                          {r.label}
+                        </th>
+                      )}
+                    </For>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-zinc-800/60">
+                  <For each={d().capabilities}>
+                    {(cap) => (
+                      <tr class="text-zinc-300">
+                        <td
+                          class="px-3 py-2 font-mono text-zinc-400 sticky left-0 bg-zinc-950"
+                          title={cap.description}
+                        >
+                          {cap.id}
+                        </td>
+                        <For each={d().roles}>
+                          {(r) => (
+                            <td class="px-3 py-2 text-center">
+                              <Show
+                                when={r.capabilities.includes(cap.id)}
+                                fallback={<span class="text-zinc-700">·</span>}
+                              >
+                                <span class="text-emerald-400">●</span>
+                              </Show>
+                            </td>
+                          )}
+                        </For>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="space-y-2">
+              <h4 class="text-[9px] uppercase tracking-wider text-zinc-500">
+                Role descriptions
+              </h4>
+              <ul class="space-y-1 text-[10px] text-zinc-500">
+                <For each={d().roles}>
+                  {(r) => (
+                    <li>
+                      <span class="text-zinc-200">{r.label}:</span> {r.description}
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          </div>
+        )}
+      </Show>
+    </section>
+  );
+};
+
+// ── OIDC ─────────────────────────────────────────────────────────────────────
+
+const DEFAULT_GROUP_MAPPING: OidcGroupMapping = { group: "", role: "viewer" };
+
+const OidcSection: Component<{
+  status: IntegrationStatus | undefined;
+  onSave: (p: {
+    issuer_url?: string | null;
+    client_id?: string | null;
+    client_secret?: string | null;
+    group_mappings?: OidcGroupMapping[] | null;
+  }) => Promise<void>;
+  onClear: () => Promise<void>;
+}> = (props) => {
+  const initialIssuer = () =>
+    (props.status?.plain?.issuer_url as string | undefined) ?? "";
+  const initialClient = () =>
+    (props.status?.plain?.client_id as string | undefined) ?? "";
+  const initialMappings = (): OidcGroupMapping[] => {
+    const raw = props.status?.plain?.group_mappings as unknown;
+    return Array.isArray(raw) ? (raw as OidcGroupMapping[]) : [];
+  };
+
+  const [issuer, setIssuer] = createSignal(initialIssuer());
+  const [clientId, setClientId] = createSignal(initialClient());
+  const [clientSecret, setClientSecret] = createSignal("");
+  const [mappings, setMappings] = createSignal<OidcGroupMapping[]>(initialMappings());
+  const [saving, setSaving] = createSignal(false);
+
+  const submit = async (e: SubmitEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await props.onSave({
+        issuer_url: issuer(),
+        client_id: clientId(),
+        ...(clientSecret() ? { client_secret: clientSecret() } : {}),
+        group_mappings: mappings(),
+      });
+      setClientSecret("");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clear = async () => {
+    if (
+      !confirm(
+        "Clear OIDC configuration? Users sign in with local passwords until it's reconfigured.",
+      )
+    )
+      return;
+    await props.onClear();
+    setIssuer("");
+    setClientId("");
+    setClientSecret("");
+    setMappings([]);
+  };
+
+  const addMapping = () =>
+    setMappings((m) => [...m, { ...DEFAULT_GROUP_MAPPING }]);
+  const removeMapping = (idx: number) =>
+    setMappings((m) => m.filter((_, i) => i !== idx));
+  const updateMapping = (idx: number, patch: Partial<OidcGroupMapping>) =>
+    setMappings((m) => m.map((entry, i) => (i === idx ? { ...entry, ...patch } : entry)));
+
+  return (
+    <Section
+      title="OIDC / single sign-on"
+      description="Configure an OpenID Connect identity provider. Group claims map to Lumen roles — every user gets the role of the first group they belong to. The configuration is stored now; the actual sign-in flow lands in #14."
+      status={props.status}
+    >
+      <div class="px-3 py-2 mb-3 text-[10px] text-sky-300 bg-sky-950/30 border border-sky-900/60 rounded">
+        Configuration only — the OIDC sign-in flow ships with{" "}
+        <a
+          href="https://github.com/jamesagarside/lumen/issues/14"
+          target="_blank"
+          rel="noreferrer"
+          class="underline hover:text-sky-200"
+        >
+          issue #14
+        </a>
+        . Settings entered here will be picked up automatically the moment that
+        ships.
+      </div>
+      <form onSubmit={submit} class="space-y-3">
+        <Field
+          label="Issuer URL"
+          hint="The OIDC issuer base URL — used for .well-known discovery. Trailing slash is stripped."
+        >
+          <input
+            type="url"
+            class={inputClass}
+            value={issuer()}
+            onInput={(e) => setIssuer(e.currentTarget.value)}
+            placeholder="https://login.example.com/realms/lumen"
+          />
+        </Field>
+        <Field label="Client ID">
+          <input
+            type="text"
+            class={inputClass}
+            value={clientId()}
+            onInput={(e) => setClientId(e.currentTarget.value)}
+            placeholder="lumen-web"
+          />
+        </Field>
+        <Field
+          label="Client secret"
+          hint="Issued by the IdP when you register the application."
+        >
+          <SecretInput
+            value={clientSecret()}
+            onInput={setClientSecret}
+            alreadyConfigured={!!props.status?.secret_configured}
+          />
+        </Field>
+
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] text-zinc-400 uppercase tracking-wider">
+              Group → role mappings
+            </span>
+            <button
+              type="button"
+              class="text-[10px] text-zinc-500 hover:text-amber-300 px-2 py-0.5"
+              onClick={addMapping}
+            >
+              + add mapping
+            </button>
+          </div>
+          <p class="text-[9px] text-zinc-600">
+            First match wins. A user with no matching group is refused sign-in rather
+            than created with no role.
+          </p>
+          <Show
+            when={mappings().length > 0}
+            fallback={
+              <p class="text-[10px] text-zinc-600 italic px-1">
+                no group mappings — every authenticated user will be rejected
+              </p>
+            }
+          >
+            <ul class="space-y-1.5">
+              <Index each={mappings()}>
+                {(m, idx) => (
+                  <li class="flex items-center gap-2">
+                    <input
+                      type="text"
+                      class={inputClass + " flex-1"}
+                      value={m().group}
+                      onInput={(e) =>
+                        updateMapping(idx, { group: e.currentTarget.value })
+                      }
+                      placeholder="upstream-group-name"
+                    />
+                    <span class="text-[10px] text-zinc-600">→</span>
+                    <select
+                      class={inputClass + " w-40"}
+                      value={m().role}
+                      onChange={(e) =>
+                        updateMapping(idx, {
+                          role: e.currentTarget.value as UserRole,
+                        })
+                      }
+                    >
+                      <For each={ROLE_OPTIONS}>
+                        {(id) => <option value={id}>{id}</option>}
+                      </For>
+                    </select>
+                    <button
+                      type="button"
+                      class="text-zinc-600 hover:text-rose-400 px-2"
+                      onClick={() => removeMapping(idx)}
+                      title="remove"
+                    >
+                      ✕
+                    </button>
+                  </li>
+                )}
+              </Index>
+            </ul>
+          </Show>
+        </div>
+
+        <FormActions
+          saving={saving()}
+          envLocked={false}
+          canClear={!!props.status?.plain_source || !!props.status?.secret_configured}
           onClear={() => void clear()}
         />
       </form>
