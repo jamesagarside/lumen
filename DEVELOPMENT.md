@@ -145,8 +145,8 @@ All operational config is via environment variables (per `CONTEXT.md` §15):
 | `LUMEN_INGEST_API_KEY` | (unset) | Optional shared secret required by `POST /ingest/flows`. Unset = open ingestion. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | If set, traces are exported via OTLP/gRPC. The standard `OTEL_*` env vars (service name, headers, etc.) are also honored. |
 | `OTEL_SERVICE_NAME` | `lumen` | Service name attached to exported spans. |
-| `LUMEN_INITIAL_ADMIN_EMAIL` | (unset) | First-run admin bootstrap. Required alongside `LUMEN_INITIAL_ADMIN_PASSWORD` on the first start, otherwise nobody can log in. |
-| `LUMEN_INITIAL_ADMIN_PASSWORD` | (unset) | First-run admin password. After the admin exists this is ignored. |
+| `LUMEN_INITIAL_ADMIN_EMAIL` | (unset) | First-run admin bootstrap. Required alongside `LUMEN_INITIAL_ADMIN_PASSWORD` on the first start, otherwise nobody can log in. Dev convention is `admin@lumen.test` — `scripts/post_events.py` and `make demo-events*` default to that. |
+| `LUMEN_INITIAL_ADMIN_PASSWORD` | (unset) | First-run admin password. After the admin exists this is ignored. Dev convention is `test1234!`. |
 | `UDM_URL` | (unset) | UniFi Network Integration API URL, e.g. `https://192.168.0.1/proxy/network/integration/v1/sites`. Set both this and `UDM_API_KEY` to auto-label devices from the controller. |
 | `UDM_API_KEY` | (unset) | UniFi API key (Settings → Control Plane → Integrations → Create API Key). |
 | `LUMEN_DETECTION_WEBHOOK_URL` | (unset) | If set, every detection event POSTed to `/ingest/events` is forwarded as JSON to this URL — Slack/Discord/n8n/Home Assistant incoming webhooks all work. |

@@ -43,13 +43,22 @@ make install
 make dev
 ```
 
-Open <http://localhost:5173>, sign in with the bootstrap admin, then either:
+**Dev convention for the bootstrap admin** — the scripts in `scripts/` and the `make demo-*` helpers default to:
+
+```text
+email:    admin@lumen.test
+password: test1234!
+```
+
+Set those in `.env` for local work; pick something real for any deployment that lives outside your laptop.
+
+Open <http://localhost:5173>, sign in, then either:
 
 - Point a NetFlow exporter at `UDP 2055`, or
 - Forward iptables-LOG syslog to `UDP 5514`, or
 - `make demo-stream` for a synthetic feed.
 
-If you have a UniFi gateway, set `UDM_URL` + `UDM_API_KEY` in `.env` and your devices show up by their real names within 60 seconds.
+Once you're in, open **⚙ Settings** in the header to wire up UniFi (labels + IPS) and an outbound webhook. Credentials are stored encrypted at rest, no `.env` editing or restart required.
 
 Full dev guide: [DEVELOPMENT.md](./DEVELOPMENT.md).
 
