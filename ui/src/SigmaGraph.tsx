@@ -31,11 +31,15 @@ interface Props {
   events?: DetectionEvent[];
   onSelectionChange?: (id: string | null) => void;
   selectedNodeId?: string | null;
+  /** Edge selection. `{src,dst}` per the wire shape; null = no edge selected. */
+  onEdgeSelectionChange?: (id: { src: string; dst: string } | null) => void;
+  selectedEdgeId?: { src: string; dst: string } | null;
   /** Trigger a one-shot full re-layout (called when the user clicks Re-layout). */
   relayoutSignal?: number;
   /** Which layout to apply. Changing this re-runs the positioner. */
   view?: ViewKind;
 }
+
 
 
 const SigmaGraph: Component<Props> = (props) => {
@@ -45,6 +49,7 @@ const SigmaGraph: Component<Props> = (props) => {
 
   let hoveredNode: string | null = null;
   let selectedNode: string | null = null;
+  let selectedEdge: string | null = null;
   let draggedNode: string | null = null;
   let dragSuppressClick = false;
 
@@ -63,7 +68,7 @@ const SigmaGraph: Component<Props> = (props) => {
       labelWeight: "400",
       renderLabels: true,
       renderEdgeLabels: false,
-      enableEdgeEvents: false,
+      enableEdgeEvents: true,
       // Sigma's default labelDensity (1) hides most labels at default
       // zoom to avoid clutter. With recognisable brands as labels for
       // externals + user labels for internals, we want them visible —
@@ -81,6 +86,23 @@ const SigmaGraph: Component<Props> = (props) => {
           ? { color: halo, size: ((attrs.size as number | undefined) ?? 4) + 2, forceLabel: true, zIndex: 3 }
           : null;
 
+        // Selected edge: highlight both endpoints, dim everything else.
+        if (selectedEdge !== null && graph) {
+          const [es, ed] = graph.extremities(selectedEdge);
+          if (id === es || id === ed) {
+            return {
+              ...attrs,
+              ...sevDecoration,
+              color: COLOR_HIGHLIGHT_EDGE,
+              zIndex: 4,
+              forceLabel: true,
+            };
+          }
+          return sevDecoration
+            ? { ...attrs, ...sevDecoration, label: "" }
+            : { ...attrs, color: COLOR_DIM, label: "", zIndex: 0 };
+        }
+
         const f = focused();
         if (!f || !graph) return sevDecoration ? { ...attrs, ...sevDecoration } : attrs;
         if (id === f) {
@@ -94,6 +116,19 @@ const SigmaGraph: Component<Props> = (props) => {
           : { ...attrs, color: COLOR_DIM, label: "", zIndex: 0 };
       },
       edgeReducer: (id, attrs) => {
+        // Selected edge wins over node focus: highlight it brightly and
+        // dim everything else so the picked flow stands out.
+        if (selectedEdge !== null) {
+          if (id === selectedEdge) {
+            return {
+              ...attrs,
+              color: COLOR_HIGHLIGHT_EDGE,
+              size: (attrs.size ?? 1) * 2,
+              zIndex: 2,
+            };
+          }
+          return { ...attrs, hidden: true };
+        }
         const f = focused();
         if (!f || !graph) return attrs;
         const [src, dst] = graph.extremities(id);
@@ -119,15 +154,44 @@ const SigmaGraph: Component<Props> = (props) => {
         return;
       }
       selectedNode = selectedNode === node ? null : node;
+      // Node and edge selection are mutually exclusive — clicking a
+      // node clears any edge selection so the right pane shows the
+      // node inspector.
+      if (selectedEdge !== null) {
+        selectedEdge = null;
+        props.onEdgeSelectionChange?.(null);
+      }
       props.onSelectionChange?.(selectedNode);
       sigma?.refresh();
     });
-    sigma.on("clickStage", () => {
+    sigma.on("clickEdge", ({ edge }) => {
+      // Sigma identifies edges by the key we passed at insertion time.
+      // We use `${src}->${dst}` — split it back out for the callback.
+      const arrow = edge.indexOf("->");
+      if (arrow < 0) return;
+      const src = edge.slice(0, arrow);
+      const dst = edge.slice(arrow + 2);
+      selectedEdge = selectedEdge === edge ? null : edge;
       if (selectedNode !== null) {
         selectedNode = null;
         props.onSelectionChange?.(null);
-        sigma?.refresh();
       }
+      props.onEdgeSelectionChange?.(selectedEdge ? { src, dst } : null);
+      sigma?.refresh();
+    });
+    sigma.on("clickStage", () => {
+      let changed = false;
+      if (selectedNode !== null) {
+        selectedNode = null;
+        props.onSelectionChange?.(null);
+        changed = true;
+      }
+      if (selectedEdge !== null) {
+        selectedEdge = null;
+        props.onEdgeSelectionChange?.(null);
+        changed = true;
+      }
+      if (changed) sigma?.refresh();
     });
 
     // ── drag-to-pin wiring ────────────────────────────────────────────────
@@ -218,6 +282,18 @@ const SigmaGraph: Component<Props> = (props) => {
     if (ext === undefined) return;
     if (selectedNode !== ext) {
       selectedNode = ext;
+      sigma?.refresh();
+    }
+  });
+
+  // External edge deselect (inspector close, or the parent clearing
+  // when a node was clicked elsewhere).
+  createEffect(() => {
+    const ext = props.selectedEdgeId;
+    if (ext === undefined) return;
+    const want = ext ? `${ext.src}->${ext.dst}` : null;
+    if (selectedEdge !== want) {
+      selectedEdge = want;
       sigma?.refresh();
     }
   });

@@ -11,6 +11,7 @@ import {
 import AdminSettings from "./AdminSettings";
 import CommandPalette from "./CommandPalette";
 import DaemonBanner from "./DaemonBanner";
+import EdgeInspector from "./EdgeInspector";
 import EventsSidebar from "./EventsSidebar";
 import FlowTable from "./FlowTable";
 import Login from "./Login";
@@ -104,6 +105,20 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
   const eventsStore = createEventsStore();
   const scrubStore = createScrubStore();
   const [selectedNode, setSelectedNode] = createSignal<string | null>(null);
+  const [selectedEdge, setSelectedEdge] = createSignal<{
+    src: string;
+    dst: string;
+  } | null>(null);
+  // Selecting a node clears an edge, and vice-versa — the right pane
+  // shows one or the other, never both.
+  const selectNode = (id: string | null) => {
+    if (id) setSelectedEdge(null);
+    setSelectedNode(id);
+  };
+  const selectEdge = (e: { src: string; dst: string } | null) => {
+    if (e) setSelectedNode(null);
+    setSelectedEdge(e);
+  };
   const [relayoutTick, setRelayoutTick] = createSignal(0);
   const [pane, setPane] = createSignal<RightPane>("flows");
   const [view, setView] = createSignal<ViewKind>("graph");
@@ -242,7 +257,9 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
               snapshot={effectiveSnapshot()}
               events={eventsStore.events()}
               selectedNodeId={selectedNode()}
-              onSelectionChange={setSelectedNode}
+              onSelectionChange={selectNode}
+              selectedEdgeId={selectedEdge()}
+              onEdgeSelectionChange={selectEdge}
               relayoutSignal={relayoutTick()}
               view={view()}
             />
@@ -254,8 +271,11 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
         <Show when={!isKiosk()}>
         <section class="bg-zinc-950 min-h-0 overflow-hidden flex flex-col">
           <Show
-            when={selectedNode()}
+            when={selectedEdge()}
             fallback={
+              <Show
+                when={selectedNode()}
+                fallback={
               <div class="flex-1 min-h-0 flex flex-col">
                 <div class="flex border-b border-zinc-800/60 flex-shrink-0">
                   <PaneTab
@@ -286,22 +306,31 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
                   <Show when={pane() === "events"}>
                     <EventsSidebar
                       events={eventsStore.events()}
-                      onSelectIp={(ip) => setSelectedNode(ip)}
+                      onSelectIp={(ip) => selectNode(ip)}
                     />
                   </Show>
                 </div>
               </div>
             }
           >
-            <NodeInspector
+                <NodeInspector
+                  snapshot={effectiveSnapshot()}
+                  events={eventsStore.events()}
+                  selectedId={selectedNode()}
+                  onClose={() => selectNode(null)}
+                  onSelectIp={(ip) => selectNode(ip)}
+                  onLabelSaved={() => {
+                    // Snapshot poll picks up the new label on the next tick.
+                  }}
+                />
+              </Show>
+          }
+          >
+            <EdgeInspector
               snapshot={effectiveSnapshot()}
-              events={eventsStore.events()}
-              selectedId={selectedNode()}
-              onClose={() => setSelectedNode(null)}
-              onSelectIp={(ip) => setSelectedNode(ip)}
-              onLabelSaved={() => {
-                // Snapshot poll picks up the new label on the next tick.
-              }}
+              selectedEdge={selectedEdge()}
+              onClose={() => selectEdge(null)}
+              onSelectIp={(ip) => selectNode(ip)}
             />
           </Show>
         </section>
