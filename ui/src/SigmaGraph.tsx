@@ -1,7 +1,8 @@
-import { onCleanup, onMount, createEffect, type Component } from "solid-js";
+import { onCleanup, onMount, createEffect, Show, type Component } from "solid-js";
 import Graph from "graphology";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import Sigma from "sigma";
+import GraphEmptyState from "./GraphEmptyState";
 import {
   graphAnchor,
   isGatewayLikeIp,
@@ -263,10 +264,20 @@ const SigmaGraph: Component<Props> = (props) => {
     persistAllPositions(graph);
   });
 
+  const isEmpty = () => {
+    const s = props.snapshot;
+    return !s || s.nodes.length === 0;
+  };
+
   return (
     <div class="relative w-full h-full">
       <div ref={container} class="absolute inset-0" style={{ background: "rgb(9 9 11)" }} />
-      <Hint />
+      <Show when={isEmpty()}>
+        <GraphEmptyState />
+      </Show>
+      <Show when={!isEmpty()}>
+        <Hint />
+      </Show>
     </div>
   );
 };

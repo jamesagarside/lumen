@@ -65,6 +65,12 @@ const App: Component = () => {
                   .user.email
               : ""
           }
+          userRole={
+            authStore.state().status === "authed"
+              ? (authStore.state() as { status: "authed"; me: { user: { role: string } } }).me
+                  .user.role
+              : ""
+          }
         />
       </Match>
     </Switch>
@@ -75,9 +81,17 @@ interface AuthedAppProps {
   onLogout: () => void;
   can: (capability: string) => boolean;
   userEmail: string;
+  userRole: string;
 }
 
 type RightPane = "flows" | "events";
+
+/** True when ?kiosk=1 is in the URL. Stable across renders. */
+const kioskFromUrl = (): boolean => {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.get("kiosk") === "1";
+};
 
 const AuthedApp: Component<AuthedAppProps> = (props) => {
   const [version] = createResource(fetchVersion);
@@ -120,6 +134,10 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
   const detectionsCount = () => eventsStore.events().length;
   let seenAtCount = 0;
 
+  // Kiosk mode: stripped chrome for wall-display use. Activated by
+  // ?kiosk=1 in the URL OR by the user having the NocDisplay role.
+  const isKiosk = () => kioskFromUrl() || props.userRole === "noc_display";
+
   const totalBytesPerSec = () => {
     const s = snapshotStore.snapshot();
     if (!s) return 0;
@@ -132,18 +150,19 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
         unreachable={snapshotStore.unreachable()}
         wsState={flowStore.connection()}
       />
-      <header class="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
-        <div class="flex items-baseline gap-3">
-          <h1 class="text-sm font-semibold tracking-tight">Lumen</h1>
-          <Show when={version()}>
-            {(v) => (
-              <span class="text-[10px] text-zinc-600">
-                v{v().version} · ABI {v().abi_version}
-              </span>
-            )}
-          </Show>
-        </div>
-        <div class="flex items-center gap-4">
+      <Show when={!isKiosk()}>
+        <header class="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
+          <div class="flex items-baseline gap-3">
+            <h1 class="text-sm font-semibold tracking-tight">Lumen</h1>
+            <Show when={version()}>
+              {(v) => (
+                <span class="text-[10px] text-zinc-600">
+                  v{v().version} · ABI {v().abi_version}
+                </span>
+              )}
+            </Show>
+          </div>
+          <div class="flex items-center gap-4">
           <Show when={!snapshotStore.unreachable() ? snapshotStore.error() : null}>
             {(err) => (
               <span class="text-[10px] text-rose-400" title={err()}>
@@ -162,21 +181,28 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
             Re-layout
           </button>
           <ConnectionPill state={flowStore.connection()} />
-          <div class="flex items-center gap-2 text-[10px] text-zinc-500 border-l border-zinc-800 pl-3 ml-1">
-            <span title={props.userEmail}>{props.userEmail.split("@")[0]}</span>
-            <button
-              type="button"
-              class="text-zinc-500 hover:text-zinc-300"
-              onClick={props.onLogout}
-              title="sign out"
-            >
-              ↩
-            </button>
+            <div class="flex items-center gap-2 text-[10px] text-zinc-500 border-l border-zinc-800 pl-3 ml-1">
+              <span title={props.userEmail}>{props.userEmail.split("@")[0]}</span>
+              <button
+                type="button"
+                class="text-zinc-500 hover:text-zinc-300"
+                onClick={props.onLogout}
+                title="sign out"
+              >
+                ↩
+              </button>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
+      </Show>
 
-      <div class="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-px bg-zinc-800">
+      <div
+        class="flex-1 min-h-0 grid gap-px bg-zinc-800"
+        classList={{
+          "grid-cols-1 lg:grid-cols-[3fr_2fr]": !isKiosk(),
+          "grid-cols-1": isKiosk(),
+        }}
+      >
         <section class="bg-zinc-950 min-h-0 overflow-hidden">
           <SigmaGraph
             snapshot={snapshotStore.snapshot()}
@@ -187,6 +213,7 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
             view={view()}
           />
         </section>
+        <Show when={!isKiosk()}>
         <section class="bg-zinc-950 min-h-0 overflow-hidden flex flex-col">
           <Show
             when={selectedNode()}
@@ -238,6 +265,7 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
             />
           </Show>
         </section>
+        </Show>
       </div>
     </main>
   );
