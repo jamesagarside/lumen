@@ -2,14 +2,15 @@ import { onCleanup, onMount, createEffect, type Component } from "solid-js";
 import Graph from "graphology";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import Sigma from "sigma";
+import {
+  graphAnchor,
+  isGatewayLikeIp,
+  layoutArchitecture,
+  layoutVlan,
+  type ViewKind,
+} from "./layouts";
 import { displayName, severityColor } from "./types";
 import type { DetectionEvent, Snapshot } from "./types";
-
-// Anchor positions for the semantic layout (CONTEXT.md §8):
-// gateway pinned at the top, internal devices cluster centred,
-// external services arc the perimeter.
-const ANCHOR_RADIUS_INTERNAL = 0.18;
-const ANCHOR_RADIUS_EXTERNAL = 0.85;
 
 const COLOR_INTERNAL = "#f4f4f5"; // zinc-100
 const COLOR_EXTERNAL = "#a1a1aa"; // zinc-400
@@ -31,32 +32,10 @@ interface Props {
   selectedNodeId?: string | null;
   /** Trigger a one-shot full re-layout (called when the user clicks Re-layout). */
   relayoutSignal?: number;
+  /** Which layout to apply. Changing this re-runs the positioner. */
+  view?: ViewKind;
 }
 
-const isGatewayLikeIp = (ip: string): boolean => {
-  const parts = ip.split(".");
-  return parts.length === 4 && parts[3] === "1";
-};
-
-const initialAnchor = (
-  meta: NodeMeta,
-  internalIndex: number,
-  internalCount: number,
-  externalIndex: number,
-  externalCount: number,
-): { x: number; y: number } => {
-  if (meta.isGateway) return { x: 0, y: -0.9 };
-  if (meta.internal) {
-    const angle = (internalIndex / Math.max(internalCount, 1)) * Math.PI * 2;
-    const r = internalCount === 1 ? 0 : ANCHOR_RADIUS_INTERNAL;
-    return { x: Math.cos(angle) * r, y: Math.sin(angle) * r };
-  }
-  const angle = (externalIndex / Math.max(externalCount, 1)) * Math.PI * 2 - Math.PI / 2;
-  return {
-    x: Math.cos(angle) * ANCHOR_RADIUS_EXTERNAL,
-    y: Math.sin(angle) * ANCHOR_RADIUS_EXTERNAL,
-  };
-};
 
 const SigmaGraph: Component<Props> = (props) => {
   let container: HTMLDivElement | undefined;
@@ -213,6 +192,25 @@ const SigmaGraph: Component<Props> = (props) => {
     sigma.refresh();
   });
 
+  // View change → re-layout everything to the new view's positions.
+  // Tracks `props.view` reactively. We always wipe drag-pinned
+  // positions here — switching views is an explicit "show me this
+  // differently" gesture, the previous arrangement should not bleed
+  // through.
+  let lastView: ViewKind | undefined;
+  createEffect(() => {
+    const view = props.view;
+    const snap = props.snapshot;
+    if (view === undefined || view === lastView) {
+      lastView = view;
+      return;
+    }
+    lastView = view;
+    if (!snap || !graph || !sigma) return;
+    applyViewLayout(graph, snap, view);
+    sigma.refresh();
+  });
+
   // External "deselect" (inspector close button).
   createEffect(() => {
     const ext = props.selectedNodeId;
@@ -313,13 +311,11 @@ function applySnapshot(graph: Graph, snap: Snapshot): Set<string> {
     };
     // Persisted position wins. Otherwise fall back to the semantic
     // anchor based on internal/external ring index.
-    const pos = node.position ?? initialAnchor(
-      meta,
-      meta.internal ? internalIdx++ : 0,
-      internalCount,
-      meta.internal ? 0 : externalIdx++,
-      externalCount,
-    );
+    const indexedInternal = meta.internal ? internalIdx++ : 0;
+    const indexedExternal = meta.internal ? 0 : externalIdx++;
+    const pos =
+      node.position ??
+      graphAnchor(node, indexedInternal, internalCount, indexedExternal, externalCount);
     const baseColor = meta.isGateway
       ? COLOR_GATEWAY
       : meta.internal
@@ -378,6 +374,65 @@ function countWith(graph: Graph, pred: (a: { internal?: boolean }) => boolean): 
     if (pred(a as { internal?: boolean })) n++;
   });
   return n;
+}
+
+/**
+ * Snap every node to the position dictated by the chosen view. For
+ * VLAN and Architecture the positions are deterministic; for Graph
+ * we drop back to the semantic-anchor + forceatlas2 settle pass.
+ */
+function applyViewLayout(graph: Graph, snap: Snapshot, view: ViewKind) {
+  if (view === "vlan") {
+    const { positions } = layoutVlan(snap.nodes);
+    positions.forEach((pos, id) => {
+      if (graph.hasNode(id)) {
+        graph.setNodeAttribute(id, "x", pos.x);
+        graph.setNodeAttribute(id, "y", pos.y);
+      }
+    });
+    return;
+  }
+  if (view === "architecture") {
+    const positions = layoutArchitecture(snap.nodes);
+    positions.forEach((pos, id) => {
+      if (graph.hasNode(id)) {
+        graph.setNodeAttribute(id, "x", pos.x);
+        graph.setNodeAttribute(id, "y", pos.y);
+      }
+    });
+    return;
+  }
+  // graph view: re-anchor + settle
+  const internalCount = snap.nodes.filter((n) => n.is_internal).length;
+  const externalCount = snap.nodes.filter((n) => !n.is_internal).length;
+  let internalIdx = 0;
+  let externalIdx = 0;
+  for (const node of snap.nodes) {
+    if (!graph.hasNode(node.id)) continue;
+    const pos = graphAnchor(
+      node,
+      node.is_internal ? internalIdx++ : 0,
+      internalCount,
+      node.is_internal ? 0 : externalIdx++,
+      externalCount,
+    );
+    graph.setNodeAttribute(node.id, "x", pos.x);
+    graph.setNodeAttribute(node.id, "y", pos.y);
+  }
+  // One quick settle pass for graph view only.
+  if (graph.order >= 2) {
+    forceAtlas2.assign(graph, {
+      iterations: 60,
+      settings: {
+        gravity: 0.3,
+        scalingRatio: 30,
+        slowDown: 2,
+        edgeWeightInfluence: 0,
+        linLogMode: true,
+        barnesHutOptimize: graph.order > 100,
+      },
+    });
+  }
 }
 
 /**
