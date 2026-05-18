@@ -117,6 +117,39 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // UniFi IPS detection provider: opt-in via UDM_CONTROLLER_URL +
+    // UDM_USERNAME + UDM_PASSWORD. Uses the legacy controller API
+    // (the Network Integration API doesn't expose alarms yet) to poll
+    // IPS/IDS events and publish them to the detection bus.
+    if let (Ok(url), Ok(user), Ok(pass)) = (
+        std::env::var("UDM_CONTROLLER_URL"),
+        std::env::var("UDM_USERNAME"),
+        std::env::var("UDM_PASSWORD"),
+    ) {
+        let url = url.trim();
+        let user = user.trim();
+        let pass = pass.trim();
+        if !url.is_empty() && !user.is_empty() && !pass.is_empty() {
+            let site = std::env::var("UDM_SITE")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "default".to_string());
+            match integrations::unifi_ips::UnifiIpsClient::new(
+                url.to_string(),
+                site.clone(),
+                user.to_string(),
+                pass.to_string(),
+            ) {
+                Ok(client) => {
+                    info!(url = %url, site = %site, "unifi-ips integration enabled");
+                    integrations::unifi_ips::spawn(client, detections.clone());
+                }
+                Err(e) => error!(error = %e, "unifi-ips integration init failed"),
+            }
+        }
+    }
+
     let app = build_router(&config, state);
     let listener = TcpListener::bind(config.http_listen)
         .await

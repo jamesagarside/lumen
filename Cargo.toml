@@ -48,7 +48,7 @@ rand = "0.8"
 hex = "0.4"
 
 # HTTP client (integrations)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
 dotenvy = "0.15"
 
 # Networking helpers

@@ -6,4 +6,5 @@
 //! without changing the engine's public API.
 
 pub mod unifi;
+pub mod unifi_ips;
 pub mod webhook;

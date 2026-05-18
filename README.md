@@ -78,6 +78,7 @@ Full dev guide: [DEVELOPMENT.md](./DEVELOPMENT.md).
 ### Integrations
 
 - **UniFi Network Integration API** (Network ≥ 9.0) — polls clients every 60 s, auto-labels matching nodes with their UniFi names. Survives self-signed TLS. Falls back to user labels.
+- **UniFi IPS / IDS alarms** — polls the controller's Threat Management feed every 30 s, dedupes by alarm id, publishes each new alarm as an ECS-shaped detection event (sidebar + node halos + outbound webhook). Uses the legacy cookie-auth path because the Network Integration API doesn't expose alarms yet.
 - **Outbound webhook consumer** — every detection event gets POSTed as JSON to `LUMEN_DETECTION_WEBHOOK_URL`. Slack / Discord / n8n / Home Assistant / PagerDuty all accept the same shape.
 
 ### Detections
@@ -139,11 +140,11 @@ Shipped:
 - Detection events: ECS schema, sidebar, severity halos, outbound webhook
 - Auth: local users + sessions + RBAC, NOC kiosk mode
 - UniFi auto-label integration
+- UniFi IPS alarm polling (legacy controller API)
 - /metrics, OTLP trace export
 
 Next:
 
-- **Real UniFi IPS polling** — legacy cookie-auth path (the Network Integration API doesn't expose alarms yet)
 - **OIDC** for federated auth
 - **WASM plugin runtime** so integrations can ship out-of-tree
 - **Time scrubber** — DAW-style rewind across the rolling raw-flow window
