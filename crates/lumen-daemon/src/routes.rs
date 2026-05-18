@@ -19,7 +19,9 @@ use crate::integrations::diagnostics::IntegrationDiagnostic;
 use crate::integrations::supervisor::{self as supervisor, IntegrationSupervisor};
 use crate::metrics::{self as app_metrics, DETECTIONS, FLOWS_INGESTED, WS_CLIENTS};
 use crate::settings::{self as settings_mod, SettingsStore};
+use crate::state::scrub::{self as scrub_mod, DEFAULT_RATE_WINDOW};
 use crate::state::{LiveStateEngine, RollingBuffer};
+use crate::topology_store::TopologyStore;
 
 const SESSION_COOKIE: &str = "lumen_session";
 
@@ -35,10 +37,13 @@ pub struct AppState {
     pub settings: SettingsStore,
     pub supervisor: IntegrationSupervisor,
     /// Time- and memory-bounded ring of raw flows (#20). Powers the
-    /// time-scrubber (#26) and feeds the rollup engine (#21). Wired
-    /// up now so producers feed it from day one; readers land with #26.
-    #[allow(dead_code)]
+    /// time-scrubber (#26) and feeds the rollup engine (#21).
     pub raw_buffer: RollingBuffer,
+    /// Cloned handle into the persisted topology store. The live engine
+    /// owns one too; the scrub handler needs an independent reference so
+    /// historical snapshots can pick up user labels / pinned positions
+    /// the same way the live snapshot does.
+    pub topology_store: Option<TopologyStore>,
 }
 
 #[derive(Serialize)]
@@ -73,6 +78,88 @@ pub async fn version() -> Json<VersionInfo> {
 /// snapshot+delta WebSocket in #8.
 pub async fn snapshot(State(state): State<AppState>) -> Json<Snapshot> {
     Json(state.engine.snapshot())
+}
+
+// ── Time scrubber (#26) ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ScrubQuery {
+    /// Playhead time as a Unix epoch in **seconds** (fractional). Accepts
+    /// JS `Date.now() / 1000`. Required.
+    pub t: f64,
+    /// Optional width of the rate window, in seconds. Default 5.
+    #[serde(default)]
+    pub window_secs: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub struct ScrubWindowResponse {
+    /// Server "now" at the moment of the request, Unix epoch seconds.
+    /// Frontend compares against this to decide whether the playhead is
+    /// "at live" or "in the past" without having to reason about clock
+    /// skew between server and client.
+    pub now_secs: f64,
+    /// Arrival time of the oldest buffered flow, if any. `null` when the
+    /// buffer is empty — the scrubber shows a disabled left edge in that
+    /// case.
+    pub earliest_secs: Option<f64>,
+    /// Configured maximum window width — i.e. the upper bound on how far
+    /// back the user can scrub regardless of how much data is buffered.
+    pub max_window_secs: u64,
+}
+
+/// `GET /scrub/window` — the scrubber UI calls this on mount and again
+/// periodically so its left/right bounds track the rolling buffer as
+/// flows accumulate.
+pub async fn scrub_window(State(state): State<AppState>) -> Json<ScrubWindowResponse> {
+    let now = std::time::SystemTime::now();
+    let now_secs = system_time_to_secs(now);
+    let earliest_secs = state.raw_buffer.earliest().map(system_time_to_secs);
+    let max_window_secs = state.raw_buffer.bounds().max_duration.as_secs();
+    Json(ScrubWindowResponse {
+        now_secs,
+        earliest_secs,
+        max_window_secs,
+    })
+}
+
+/// `GET /scrub?t=<epoch_secs>` — historical topology snapshot reconstructed
+/// from the rolling raw-flow buffer.
+///
+/// `t` outside the buffer's retention window is not rejected — the
+/// reconstructor just returns whatever it can see (typically empty, or a
+/// thin sliver near the tail). 400s are reserved for unparseable input.
+pub async fn scrub(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ScrubQuery>,
+) -> Result<Json<Snapshot>, (StatusCode, Json<ApiError>)> {
+    if !q.t.is_finite() || q.t < 0.0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "query param `t` must be a finite, non-negative epoch second".to_string(),
+            }),
+        ));
+    }
+    let t = secs_to_system_time(q.t);
+    let window = q
+        .window_secs
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .map(std::time::Duration::from_secs_f64)
+        .unwrap_or(DEFAULT_RATE_WINDOW);
+    let snap =
+        scrub_mod::reconstruct_at(&state.raw_buffer, t, window, state.topology_store.as_ref());
+    Ok(Json(snap))
+}
+
+fn system_time_to_secs(t: std::time::SystemTime) -> f64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn secs_to_system_time(secs: f64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(secs)
 }
 
 // ── Detection events ────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@
 pub mod diff;
 pub mod rate;
 pub mod rolling_buffer;
+pub mod scrub;
 
 pub use rolling_buffer::{Bounds as RollingBufferBounds, RollingBuffer};
 

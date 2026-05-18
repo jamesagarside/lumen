@@ -64,7 +64,10 @@ async fn main() -> anyhow::Result<()> {
     let secrets =
         SecretStore::open(topology_store.db(), &config.data_dir).context("opening secret store")?;
     let settings = SettingsStore::new(topology_store.db(), secrets).context("opening settings")?;
-    let engine = LiveStateEngine::with_store(Some(topology_store));
+    // Hand the engine its own clone of the store, keep one for the scrub
+    // reconstructor (#26) so historical snapshots also pick up user labels
+    // and pinned positions.
+    let engine = LiveStateEngine::with_store(Some(topology_store.clone()));
     let raw_buffer = RollingBuffer::new(RollingBufferBounds {
         max_duration: config.raw_window_duration,
         max_bytes: config.raw_window_bytes,
@@ -85,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
         settings: settings.clone(),
         supervisor: supervisor.clone(),
         raw_buffer: raw_buffer.clone(),
+        topology_store: Some(topology_store),
     };
 
     // Engine consumes flows from the bus and maintains the topology.
@@ -157,6 +161,9 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
         // attaches the user if a session is valid, frontend uses
         // /auth/me to gate UI).
         .route("/snapshot", get(routes::snapshot))
+        // Time scrubber (#26): historical topology + windowed rate.
+        .route("/scrub", get(routes::scrub))
+        .route("/scrub/window", get(routes::scrub_window))
         .route("/ws/flows", get(routes::ws_flows))
         // Mutating endpoints — gated.
         .route(
@@ -392,6 +399,7 @@ mod tests {
             settings,
             supervisor,
             raw_buffer: RollingBuffer::new(RollingBufferBounds::DEFAULT),
+            topology_store: None,
         }
     }
 
@@ -444,6 +452,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Scrub routes ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn scrub_window_reports_empty_buffer() {
+        let app = build_router(&test_config(), test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/scrub/window")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(body["earliest_secs"].is_null());
+        assert!(body["now_secs"].as_f64().unwrap() > 0.0);
+        assert!(body["max_window_secs"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn scrub_rejects_negative_t() {
+        let app = build_router(&test_config(), test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/scrub?t=-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn scrub_returns_empty_snapshot_when_buffer_empty() {
+        let app = build_router(&test_config(), test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/scrub?t=1000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["nodes"].as_array().unwrap().len(), 0);
+        assert_eq!(body["edges"].as_array().unwrap().len(), 0);
     }
 
     // ── Admin settings end-to-end ───────────────────────────────────────
