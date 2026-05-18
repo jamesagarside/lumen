@@ -17,7 +17,7 @@ use crate::integrations::supervisor::IntegrationSupervisor;
 use crate::routes::AppState;
 use crate::secret_store::SecretStore;
 use crate::settings::SettingsStore;
-use crate::state::LiveStateEngine;
+use crate::state::{LiveStateEngine, RollingBuffer, RollingBufferBounds};
 use crate::topology_store::TopologyStore;
 
 mod auth;
@@ -32,6 +32,8 @@ mod routes;
 mod secret_store;
 mod settings;
 mod state;
+#[cfg(test)]
+mod test_env;
 mod topology_store;
 
 #[tokio::main]
@@ -63,6 +65,15 @@ async fn main() -> anyhow::Result<()> {
         SecretStore::open(topology_store.db(), &config.data_dir).context("opening secret store")?;
     let settings = SettingsStore::new(topology_store.db(), secrets).context("opening settings")?;
     let engine = LiveStateEngine::with_store(Some(topology_store));
+    let raw_buffer = RollingBuffer::new(RollingBufferBounds {
+        max_duration: config.raw_window_duration,
+        max_bytes: config.raw_window_bytes,
+    });
+    info!(
+        window_secs = config.raw_window_duration.as_secs(),
+        window_bytes = config.raw_window_bytes,
+        "rolling raw-flow buffer ready"
+    );
     let supervisor =
         IntegrationSupervisor::new(engine.clone(), detections.clone(), settings.clone());
     let state = AppState {
@@ -73,10 +84,17 @@ async fn main() -> anyhow::Result<()> {
         ingest_api_key: config.ingest_api_key.as_deref().map(Arc::from),
         settings: settings.clone(),
         supervisor: supervisor.clone(),
+        raw_buffer: raw_buffer.clone(),
     };
 
     // Engine consumes flows from the bus and maintains the topology.
     spawn_engine_ingest(bus.clone(), engine.clone());
+
+    // Rolling raw-flow buffer consumes the same bus, separately from the
+    // engine — append is O(1) and never blocks ingestion. Powers #26 time
+    // scrub and feeds #21 rollups.
+    spawn_raw_buffer_ingest(bus.clone(), raw_buffer.clone());
+    spawn_raw_buffer_sweep(raw_buffer.clone(), config.eviction_interval);
 
     // Periodic eviction of stale edges and orphaned nodes.
     spawn_eviction(
@@ -251,6 +269,35 @@ fn spawn_engine_ingest(bus: FlowBus, engine: LiveStateEngine) {
     });
 }
 
+fn spawn_raw_buffer_ingest(bus: FlowBus, buffer: RollingBuffer) {
+    let mut rx = bus.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(flow) => buffer.append(flow),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(missed = n, "raw buffer lagged on flow stream");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Time-based eviction sweep for the raw buffer. Appends already evict, so
+/// this only matters during quiet periods — without it, the head of the
+/// deque keeps stale records until the next packet arrives.
+fn spawn_raw_buffer_sweep(buffer: RollingBuffer, interval: std::time::Duration) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            buffer.evict_older_than(std::time::SystemTime::now());
+        }
+    });
+}
+
 fn spawn_eviction(
     engine: LiveStateEngine,
     max_age: std::time::Duration,
@@ -299,6 +346,14 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    // The admin_session helper takes the shared `test_env::ENV_LOCK` and
+    // hands it back to the caller so it lives for the test body. That
+    // guard is held across `.await` points (we make HTTP requests after
+    // grabbing it), which clippy flags. The guard is a process-global
+    // test-isolation lock, not a per-task lock, and `tokio::test` uses a
+    // current-thread runtime so there's no migration risk.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -314,6 +369,8 @@ mod tests {
             data_dir: std::path::PathBuf::from("./data"),
             ingest_api_key: None,
             syslog_listen: None,
+            raw_window_duration: std::time::Duration::from_secs(15 * 60),
+            raw_window_bytes: 512 * 1024 * 1024,
         }
     }
 
@@ -334,6 +391,7 @@ mod tests {
             ingest_api_key: None,
             settings,
             supervisor,
+            raw_buffer: RollingBuffer::new(RollingBufferBounds::DEFAULT),
         }
     }
 
@@ -390,25 +448,11 @@ mod tests {
 
     // ── Admin settings end-to-end ───────────────────────────────────────
 
-    /// Establish an Admin user, log in, return (router, session cookie).
-    /// We can't reuse the app between requests because oneshot consumes
-    /// it, so we rebuild it for each call against the same state.
-    async fn admin_session() -> (AppState, String) {
-        // Clear env vars that the settings store would otherwise pick
-        // up — these tests assert "no DB config => returns None", so
-        // an ambient `.env` on the dev box would otherwise corrupt
-        // results.
-        for k in [
-            "UDM_URL",
-            "UDM_API_KEY",
-            "UDM_CONTROLLER_URL",
-            "UDM_USERNAME",
-            "UDM_PASSWORD",
-            "UDM_SITE",
-            "LUMEN_DETECTION_WEBHOOK_URL",
-        ] {
-            unsafe { std::env::remove_var(k) };
-        }
+    /// Establish an Admin user, log in, return (router, session cookie,
+    /// env-lock guard). The guard must be bound for the test's full body
+    /// — siblings touching the same env vars take the same lock.
+    async fn admin_session() -> (AppState, String, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::test_env::clear_env();
         let state = test_state();
         state
             .auth
@@ -438,7 +482,7 @@ mod tests {
             .next()
             .unwrap()
             .to_string();
-        (state, cookie)
+        (state, cookie, guard)
     }
 
     async fn read_body_json(response: axum::response::Response) -> serde_json::Value {
@@ -465,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_settings_lists_three_unconfigured_integrations() {
-        let (state, cookie) = admin_session().await;
+        let (state, cookie, _env_lock) = admin_session().await;
         let app = build_router(&test_config(), state);
         let response = app
             .oneshot(
@@ -491,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_unifi_ips_persists_and_starts_integration() {
-        let (state, cookie) = admin_session().await;
+        let (state, cookie, _env_lock) = admin_session().await;
         let payload = serde_json::json!({
             "controller_url": "https://udm.invalid",
             "username": "lumen-reader",
@@ -553,7 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_unifi_ips_clears_and_stops() {
-        let (state, cookie) = admin_session().await;
+        let (state, cookie, _env_lock) = admin_session().await;
         // Configure first.
         let payload = serde_json::json!({
             "controller_url": "https://udm.invalid",
