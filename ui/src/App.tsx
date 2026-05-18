@@ -315,6 +315,7 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
           >
                 <NodeInspector
                   snapshot={effectiveSnapshot()}
+                  flows={flowStore.flows()}
                   events={eventsStore.events()}
                   selectedId={selectedNode()}
                   onClose={() => selectNode(null)}
