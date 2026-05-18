@@ -165,9 +165,10 @@ impl UnifiClient {
 
 /// Spawn a background task that polls UniFi and auto-labels nodes.
 /// The task runs forever; if a poll fails we log and try again on
-/// the next tick.
-pub fn spawn(client: UnifiClient, engine: LiveStateEngine) {
-    tokio::spawn(async move {
+/// the next tick. Returns an `AbortHandle` so the supervisor can
+/// tear the task down when settings change.
+pub fn spawn(client: UnifiClient, engine: LiveStateEngine) -> tokio::task::AbortHandle {
+    let handle = tokio::spawn(async move {
         info!(
             interval_secs = POLL_INTERVAL.as_secs(),
             "unifi integration: poller started"
@@ -194,6 +195,7 @@ pub fn spawn(client: UnifiClient, engine: LiveStateEngine) {
             }
         }
     });
+    handle.abort_handle()
 }
 
 #[derive(Debug, Default)]

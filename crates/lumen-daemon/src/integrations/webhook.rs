@@ -19,7 +19,7 @@ use crate::detections::DetectionBus;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub fn spawn(url: String, bus: DetectionBus) {
+pub fn spawn(url: String, bus: DetectionBus) -> Option<tokio::task::AbortHandle> {
     let http = match reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .danger_accept_invalid_certs(true)
@@ -28,11 +28,11 @@ pub fn spawn(url: String, bus: DetectionBus) {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, "webhook consumer: HTTP client init failed; disabled");
-            return;
+            return None;
         }
     };
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         info!(url = %url, "webhook consumer: forwarding detection events");
         let mut rx = bus.subscribe();
         loop {
@@ -55,6 +55,7 @@ pub fn spawn(url: String, bus: DetectionBus) {
             }
         }
     });
+    Some(handle.abort_handle())
 }
 
 async fn forward(http: &reqwest::Client, url: &str, event: DetectionEvent) {

@@ -15,7 +15,9 @@ use tracing::{debug, warn};
 use crate::auth::{AuthStore, User, UserSummary};
 use crate::detections::DetectionBus;
 use crate::ingest::FlowBus;
+use crate::integrations::supervisor::{self as supervisor, IntegrationSupervisor};
 use crate::metrics::{self as app_metrics, DETECTIONS, FLOWS_INGESTED, WS_CLIENTS};
+use crate::settings::{self as settings_mod, SettingsStore};
 use crate::state::LiveStateEngine;
 
 const SESSION_COOKIE: &str = "lumen_session";
@@ -29,6 +31,8 @@ pub struct AppState {
     /// If `Some`, every POST /ingest/flows must include a matching
     /// `X-Api-Key` header. If `None`, ingestion is open.
     pub ingest_api_key: Option<Arc<str>>,
+    pub settings: SettingsStore,
+    pub supervisor: IntegrationSupervisor,
 }
 
 #[derive(Serialize)]
@@ -447,6 +451,188 @@ impl Drop for WsClientGauge {
     fn drop(&mut self) {
         metrics::gauge!(WS_CLIENTS).decrement(1.0);
     }
+}
+
+// ── Admin: integration settings ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct IntegrationStatusResponse {
+    /// Stable id, matches `crate::settings::id::*` / supervisor kind.
+    pub id: &'static str,
+    /// Non-secret fields (URL, site, username, etc.) as JSON.
+    pub plain: serde_json::Value,
+    /// Where the plain config was sourced from (db, env, or none).
+    pub plain_source: Option<settings_mod::Source>,
+    /// True if a secret value is configured. The value itself is
+    /// never returned.
+    pub secret_configured: bool,
+    pub secret_source: Option<settings_mod::Source>,
+    /// True if the supervisor currently has a running task for this
+    /// integration. False = either no config or the task exited.
+    pub running: bool,
+}
+
+impl From<(settings_mod::IntegrationStatus, bool)> for IntegrationStatusResponse {
+    fn from((s, running): (settings_mod::IntegrationStatus, bool)) -> Self {
+        Self {
+            id: s.id,
+            plain: s.plain,
+            plain_source: s.plain_source,
+            secret_configured: s.secret_configured,
+            secret_source: s.secret_source,
+            running,
+        }
+    }
+}
+
+/// `GET /admin/settings` — full snapshot of integration config (plain
+/// values + secret-set flags + runtime status). The admin UI polls
+/// this on page load.
+pub async fn list_settings(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<IntegrationStatusResponse>>, (StatusCode, Json<ApiError>)> {
+    let statuses = state.settings.all_statuses().map_err(internal_err)?;
+    let resp: Vec<IntegrationStatusResponse> = statuses
+        .into_iter()
+        .map(|s| {
+            let running = state.supervisor.is_running(s.id);
+            (s, running).into()
+        })
+        .collect();
+    Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
+pub struct UnifiLabelsPayload {
+    /// Network Integration API sites URL. Empty string = clear.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// API key. Omitted = leave existing value in place; empty string
+    /// = clear.
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UnifiIpsPayload {
+    #[serde(default)]
+    pub controller_url: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub site: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct WebhookPayload {
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// `PUT /admin/settings/unifi_labels`
+pub async fn put_unifi_labels(
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+    Json(p): Json<UnifiLabelsPayload>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    state
+        .settings
+        .set_unifi_labels(p.url, p.api_key)
+        .map_err(internal_err)?;
+    audit_settings_write(user_ext.as_deref(), "unifi_labels", "update");
+    state
+        .supervisor
+        .reload_unifi_labels()
+        .map_err(internal_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /admin/settings/unifi_labels`
+pub async fn delete_unifi_labels(
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    state.settings.clear_unifi_labels().map_err(internal_err)?;
+    audit_settings_write(user_ext.as_deref(), "unifi_labels", "clear");
+    state
+        .supervisor
+        .reload_unifi_labels()
+        .map_err(internal_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /admin/settings/unifi_ips`
+pub async fn put_unifi_ips(
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+    Json(p): Json<UnifiIpsPayload>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    state
+        .settings
+        .set_unifi_ips(p.controller_url, p.username, p.password, p.site)
+        .map_err(internal_err)?;
+    audit_settings_write(user_ext.as_deref(), "unifi_ips", "update");
+    state.supervisor.reload_unifi_ips().map_err(internal_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /admin/settings/unifi_ips`
+pub async fn delete_unifi_ips(
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    state.settings.clear_unifi_ips().map_err(internal_err)?;
+    audit_settings_write(user_ext.as_deref(), "unifi_ips", "clear");
+    state.supervisor.reload_unifi_ips().map_err(internal_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /admin/settings/webhook`
+pub async fn put_webhook(
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+    Json(p): Json<WebhookPayload>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    state.settings.set_webhook(p.url).map_err(internal_err)?;
+    audit_settings_write(user_ext.as_deref(), "webhook", "update");
+    state.supervisor.reload_webhook().map_err(internal_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /admin/settings/webhook`
+pub async fn delete_webhook(
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    state.settings.clear_webhook().map_err(internal_err)?;
+    audit_settings_write(user_ext.as_deref(), "webhook", "clear");
+    state.supervisor.reload_webhook().map_err(internal_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// One-line structured audit log for every settings mutation. Never
+/// logs secret values — `kind` is the integration id, `action` is
+/// "update" or "clear", and the acting user_id is included if known.
+fn audit_settings_write(user: Option<&User>, kind: &str, action: &str) {
+    let user_id = user.map(|u| u.id.as_str()).unwrap_or("unknown");
+    let email = user.map(|u| u.email.as_str()).unwrap_or("");
+    tracing::info!(
+        target: "lumen::audit",
+        user_id,
+        user_email = email,
+        integration = kind,
+        action,
+        "settings change"
+    );
+    // Touch supervisor kind names so the const lookup table stays
+    // exercised even when the audit log is the only consumer.
+    let _ = (
+        supervisor::kind::UNIFI_LABELS,
+        supervisor::kind::UNIFI_IPS,
+        supervisor::kind::WEBHOOK,
+    );
 }
 
 async fn handle_ws_flows(mut socket: WebSocket, bus: FlowBus) {

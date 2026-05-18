@@ -350,10 +350,11 @@ impl DedupeSet {
     }
 }
 
-/// Spawn the IPS poller. Runs until the process dies; per-tick errors
-/// are logged and the loop continues.
-pub fn spawn(client: UnifiIpsClient, bus: DetectionBus) {
-    tokio::spawn(async move {
+/// Spawn the IPS poller. Runs until aborted; per-tick errors are
+/// logged and the loop continues. Returns the `AbortHandle` so the
+/// supervisor can stop it when admin settings change.
+pub fn spawn(client: UnifiIpsClient, bus: DetectionBus) -> tokio::task::AbortHandle {
+    let handle = tokio::spawn(async move {
         info!(
             site = %client.site,
             interval_secs = POLL_INTERVAL.as_secs(),
@@ -398,6 +399,7 @@ pub fn spawn(client: UnifiIpsClient, bus: DetectionBus) {
             }
         }
     });
+    handle.abort_handle()
 }
 
 #[instrument(skip_all)]

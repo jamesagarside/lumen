@@ -2,7 +2,7 @@ use anyhow::Context;
 use std::sync::Arc;
 
 use axum::middleware;
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::Router;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -13,7 +13,10 @@ use tracing::{error, info};
 use crate::auth::{AuthStore, Role};
 use crate::detections::DetectionBus;
 use crate::ingest::{syslog, udp_listener, FlowBus};
+use crate::integrations::supervisor::IntegrationSupervisor;
 use crate::routes::AppState;
+use crate::secret_store::SecretStore;
+use crate::settings::SettingsStore;
 use crate::state::LiveStateEngine;
 use crate::topology_store::TopologyStore;
 
@@ -26,6 +29,8 @@ mod integrations;
 mod metrics;
 mod observability;
 mod routes;
+mod secret_store;
+mod settings;
 mod state;
 mod topology_store;
 
@@ -54,13 +59,20 @@ async fn main() -> anyhow::Result<()> {
     let topology_store = open_topology_store(&config)?;
     let auth_store = AuthStore::new(topology_store.db()).context("opening auth store")?;
     bootstrap_admin(&auth_store, &config)?;
+    let secrets =
+        SecretStore::open(topology_store.db(), &config.data_dir).context("opening secret store")?;
+    let settings = SettingsStore::new(topology_store.db(), secrets).context("opening settings")?;
     let engine = LiveStateEngine::with_store(Some(topology_store));
+    let supervisor =
+        IntegrationSupervisor::new(engine.clone(), detections.clone(), settings.clone());
     let state = AppState {
         bus: bus.clone(),
         detections: detections.clone(),
         engine: engine.clone(),
         auth: auth_store,
         ingest_api_key: config.ingest_api_key.as_deref().map(Arc::from),
+        settings: settings.clone(),
+        supervisor: supervisor.clone(),
     };
 
     // Engine consumes flows from the bus and maintains the topology.
@@ -91,64 +103,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Outbound webhook consumer for detection events. Opt-in via
-    // LUMEN_DETECTION_WEBHOOK_URL — set to a Slack/Discord/n8n/HA
-    // incoming webhook to push every detection there.
-    if let Ok(url) = std::env::var("LUMEN_DETECTION_WEBHOOK_URL") {
-        let url = url.trim().to_string();
-        if !url.is_empty() {
-            integrations::webhook::spawn(url, detections.clone());
-        }
-    }
-
-    // UniFi integration: opt-in via UDM_URL + UDM_API_KEY. Auto-
-    // labels nodes whose IPs the controller knows about.
-    if let (Ok(url), Ok(key)) = (std::env::var("UDM_URL"), std::env::var("UDM_API_KEY")) {
-        let url = url.trim();
-        let key = key.trim();
-        if !url.is_empty() && !key.is_empty() {
-            match integrations::unifi::UnifiClient::new(url.to_string(), key.to_string()) {
-                Ok(client) => {
-                    info!(url = %url, "unifi integration enabled");
-                    integrations::unifi::spawn(client, engine.clone());
-                }
-                Err(e) => error!(error = %e, "unifi integration init failed"),
-            }
-        }
-    }
-
-    // UniFi IPS detection provider: opt-in via UDM_CONTROLLER_URL +
-    // UDM_USERNAME + UDM_PASSWORD. Uses the legacy controller API
-    // (the Network Integration API doesn't expose alarms yet) to poll
-    // IPS/IDS events and publish them to the detection bus.
-    if let (Ok(url), Ok(user), Ok(pass)) = (
-        std::env::var("UDM_CONTROLLER_URL"),
-        std::env::var("UDM_USERNAME"),
-        std::env::var("UDM_PASSWORD"),
-    ) {
-        let url = url.trim();
-        let user = user.trim();
-        let pass = pass.trim();
-        if !url.is_empty() && !user.is_empty() && !pass.is_empty() {
-            let site = std::env::var("UDM_SITE")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "default".to_string());
-            match integrations::unifi_ips::UnifiIpsClient::new(
-                url.to_string(),
-                site.clone(),
-                user.to_string(),
-                pass.to_string(),
-            ) {
-                Ok(client) => {
-                    info!(url = %url, site = %site, "unifi-ips integration enabled");
-                    integrations::unifi_ips::spawn(client, detections.clone());
-                }
-                Err(e) => error!(error = %e, "unifi-ips integration init failed"),
-            }
-        }
-    }
+    // All third-party integrations (UniFi labels, UniFi IPS, outbound
+    // webhook) are configured through the settings store now — admins
+    // edit them via the Settings page in the UI, env vars are read as
+    // a fallback so existing `.env` deployments keep working. The
+    // supervisor reads the current config for each integration and
+    // spawns it; later writes via the admin API trigger a respawn.
+    supervisor.start_all();
 
     let app = build_router(&config, state);
     let listener = TcpListener::bind(config.http_listen)
@@ -198,6 +159,37 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
             post(routes::ingest_events).route_layer(middleware::from_fn(routes::require_cap(
                 crate::auth::cap::INGEST_DETECTIONS,
             ))),
+        )
+        // Admin settings — read + write integration config from the UI.
+        .route(
+            "/admin/settings",
+            get(routes::list_settings).route_layer(middleware::from_fn(routes::require_cap(
+                crate::auth::cap::MANAGE_SETTINGS,
+            ))),
+        )
+        .route(
+            "/admin/settings/unifi_labels",
+            put(routes::put_unifi_labels)
+                .delete(routes::delete_unifi_labels)
+                .route_layer(middleware::from_fn(routes::require_cap(
+                    crate::auth::cap::MANAGE_SETTINGS,
+                ))),
+        )
+        .route(
+            "/admin/settings/unifi_ips",
+            put(routes::put_unifi_ips)
+                .delete(routes::delete_unifi_ips)
+                .route_layer(middleware::from_fn(routes::require_cap(
+                    crate::auth::cap::MANAGE_SETTINGS,
+                ))),
+        )
+        .route(
+            "/admin/settings/webhook",
+            put(routes::put_webhook)
+                .delete(routes::delete_webhook)
+                .route_layer(middleware::from_fn(routes::require_cap(
+                    crate::auth::cap::MANAGE_SETTINGS,
+                ))),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -328,12 +320,20 @@ mod tests {
     fn test_state() -> AppState {
         let tmp = tempfile::tempdir().unwrap();
         let db = std::sync::Arc::new(redb::Database::create(tmp.path().join("t.redb")).unwrap());
+        let detections = DetectionBus::new();
+        let engine = LiveStateEngine::new();
+        let secrets = SecretStore::with_key(db.clone(), &[0u8; 32]).unwrap();
+        let settings = SettingsStore::new(db.clone(), secrets).unwrap();
+        let supervisor =
+            IntegrationSupervisor::new(engine.clone(), detections.clone(), settings.clone());
         AppState {
             bus: FlowBus::new(),
-            detections: DetectionBus::new(),
-            engine: LiveStateEngine::new(),
+            detections,
+            engine,
             auth: AuthStore::new(db).unwrap(),
             ingest_api_key: None,
+            settings,
+            supervisor,
         }
     }
 
@@ -386,5 +386,208 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Admin settings end-to-end ───────────────────────────────────────
+
+    /// Establish an Admin user, log in, return (router, session cookie).
+    /// We can't reuse the app between requests because oneshot consumes
+    /// it, so we rebuild it for each call against the same state.
+    async fn admin_session() -> (AppState, String) {
+        // Clear env vars that the settings store would otherwise pick
+        // up — these tests assert "no DB config => returns None", so
+        // an ambient `.env` on the dev box would otherwise corrupt
+        // results.
+        for k in [
+            "UDM_URL",
+            "UDM_API_KEY",
+            "UDM_CONTROLLER_URL",
+            "UDM_USERNAME",
+            "UDM_PASSWORD",
+            "UDM_SITE",
+            "LUMEN_DETECTION_WEBHOOK_URL",
+        ] {
+            unsafe { std::env::remove_var(k) };
+        }
+        let state = test_state();
+        state
+            .auth
+            .create_user("admin@test", "hunter2!", Role::Admin)
+            .unwrap();
+        let app = build_router(&test_config(), state.clone());
+        let body = serde_json::json!({"email": "admin@test", "password": "hunter2!"}).to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "login should succeed");
+        let cookie = response
+            .headers()
+            .get("set-cookie")
+            .expect("login should set a cookie")
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        (state, cookie)
+    }
+
+    async fn read_body_json(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn admin_settings_requires_capability() {
+        let app = build_router(&test_config(), test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_settings_lists_three_unconfigured_integrations() {
+        let (state, cookie) = admin_session().await;
+        let app = build_router(&test_config(), state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/settings")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body_json(response).await;
+        let arr = body.as_array().expect("array");
+        let ids: Vec<&str> = arr.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["unifi_labels", "unifi_ips", "webhook"]);
+        for s in arr {
+            assert_eq!(s["secret_configured"], false);
+            assert_eq!(s["running"], false);
+            assert!(s["plain_source"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn put_unifi_ips_persists_and_starts_integration() {
+        let (state, cookie) = admin_session().await;
+        let payload = serde_json::json!({
+            "controller_url": "https://udm.invalid",
+            "username": "lumen-reader",
+            "password": "p@ssw0rd!",
+            "site": "default"
+        })
+        .to_string();
+        let app = build_router(&test_config(), state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/settings/unifi_ips")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // GET shows the integration as configured + running, without
+        // ever leaking the password.
+        let app = build_router(&test_config(), state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/settings")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = read_body_json(response).await;
+        let serialized = body.to_string();
+        assert!(
+            !serialized.contains("p@ssw0rd!"),
+            "secret value should never appear in GET response: {serialized}"
+        );
+        let ips = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "unifi_ips")
+            .unwrap();
+        assert_eq!(ips["plain_source"], "db");
+        assert_eq!(ips["secret_source"], "db");
+        assert_eq!(ips["secret_configured"], true);
+        assert_eq!(ips["running"], true);
+        assert_eq!(ips["plain"]["controller_url"], "https://udm.invalid");
+        assert_eq!(ips["plain"]["site"], "default");
+        assert_eq!(ips["plain"]["username"], "lumen-reader");
+        // Stop the running task so the test runtime can shut down
+        // cleanly without waiting for the poll loop.
+        state.supervisor.stop("unifi_ips");
+    }
+
+    #[tokio::test]
+    async fn delete_unifi_ips_clears_and_stops() {
+        let (state, cookie) = admin_session().await;
+        // Configure first.
+        let payload = serde_json::json!({
+            "controller_url": "https://udm.invalid",
+            "username": "lumen-reader",
+            "password": "p",
+            "site": "default"
+        })
+        .to_string();
+        build_router(&test_config(), state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/settings/unifi_ips")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(state.supervisor.is_running("unifi_ips"));
+        // Then clear.
+        let response = build_router(&test_config(), state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/admin/settings/unifi_ips")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!state.supervisor.is_running("unifi_ips"));
     }
 }

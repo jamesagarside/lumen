@@ -36,6 +36,11 @@ pub mod cap {
     pub const INGEST_FLOWS: &str = "ingest_flows";
     pub const INGEST_DETECTIONS: &str = "ingest_detections";
     pub const MANAGE_USERS: &str = "manage_users";
+    /// Read + write the admin Settings page (integration credentials,
+    /// webhook URLs, etc.). Admin-only by default — secrets are still
+    /// encrypted at rest but anyone with this capability can replace
+    /// or clear them.
+    pub const MANAGE_SETTINGS: &str = "manage_settings";
 }
 
 /// Default roles. v1 ships these four; custom roles are deferred.
@@ -61,6 +66,7 @@ impl Role {
                 cap::INGEST_FLOWS,
                 cap::INGEST_DETECTIONS,
                 cap::MANAGE_USERS,
+                cap::MANAGE_SETTINGS,
             ],
             Role::Operator => &[
                 cap::VIEW_GRAPH,

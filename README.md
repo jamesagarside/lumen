@@ -101,8 +101,14 @@ Full dev guide: [DEVELOPMENT.md](./DEVELOPMENT.md).
 ### Auth
 
 - **Local users + Argon2id**, bootstrap admin via env vars.
-- **Capability-based RBAC** — `view_graph`, `view_detections`, `edit_device_labels`, `edit_device_positions`, `ingest_flows`, `ingest_detections`, `manage_users`.
+- **Capability-based RBAC** — `view_graph`, `view_detections`, `edit_device_labels`, `edit_device_positions`, `ingest_flows`, `ingest_detections`, `manage_users`, `manage_settings`.
 - **Default roles** — Admin, Operator, Viewer, NocDisplay (the last paired with the kiosk UI variant for wall displays).
+
+### Admin
+
+- **Settings store** with encrypted-at-rest secrets — admins manage integration credentials (UniFi labels, UniFi IPS, outbound webhook) from the UI, no `.env` editing or restart required. Changes take effect within a poll cycle.
+- **ChaCha20-Poly1305 AEAD** with a 32-byte master key (auto-generated at `data/master.key`, `0600`; or `LUMEN_MASTER_KEY` env for container deploys). Per-secret random nonces; versioned envelope for future rotation.
+- **Env-var fallback** — existing `.env`-configured deployments keep working after upgrade. Save once via the UI, delete the env var. DB wins when both are set.
 
 ## Architecture
 

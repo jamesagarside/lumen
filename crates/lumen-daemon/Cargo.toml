@@ -39,6 +39,7 @@ ipnet = { workspace = true }
 argon2 = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+chacha20poly1305 = { workspace = true }
 
 reqwest = { workspace = true }
 dotenvy = { workspace = true }
