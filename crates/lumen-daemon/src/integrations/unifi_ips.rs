@@ -38,6 +38,7 @@ use serde_json::Value;
 use tracing::{debug, info, instrument, warn};
 
 use crate::detections::DetectionBus;
+use crate::integrations::diagnostics::Recorder;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -45,6 +46,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// can re-fire, but in practice the controller only returns ~1000
 /// per page so this is plenty of headroom.
 const DEDUPE_CAPACITY: usize = 4096;
+/// On a freshly-configured integration we publish the N most recent
+/// alarms immediately (even though they're "historical" from the
+/// controller's POV) so the admin sees signal in the sidebar within
+/// seconds of saving credentials. Without this they'd configure the
+/// integration and then stare at nothing until a brand-new alarm
+/// fires. The full 30-day backfill + risk-score model lands in a
+/// follow-up PR; this is the smallest possible immediate-signal fix.
+const INITIAL_BACKFILL: usize = 5;
 
 #[derive(Clone)]
 pub struct UnifiIpsClient {
@@ -353,7 +362,11 @@ impl DedupeSet {
 /// Spawn the IPS poller. Runs until aborted; per-tick errors are
 /// logged and the loop continues. Returns the `AbortHandle` so the
 /// supervisor can stop it when admin settings change.
-pub fn spawn(client: UnifiIpsClient, bus: DetectionBus) -> tokio::task::AbortHandle {
+pub fn spawn(
+    client: UnifiIpsClient,
+    bus: DetectionBus,
+    diag: Recorder,
+) -> tokio::task::AbortHandle {
     let handle = tokio::spawn(async move {
         info!(
             site = %client.site,
@@ -364,22 +377,52 @@ pub fn spawn(client: UnifiIpsClient, bus: DetectionBus) -> tokio::task::AbortHan
         // loud at startup rather than silently on each poll.
         if let Err(e) = client.login().await {
             warn!(error = %e, "unifi-ips: initial login failed (will retry)");
+            diag.record_err(format!("initial login failed: {e:#}"));
         }
 
-        // Prime the dedupe set with whatever the controller has *right
-        // now* so a fresh start doesn't replay the full alarm history
-        // as if every old alarm just fired.
         let mut dedupe = DedupeSet::new(DEDUPE_CAPACITY);
+        // On the first successful fetch:
+        // 1. Sort alarms newest-first by timestamp.
+        // 2. Publish the most recent INITIAL_BACKFILL as detection
+        //    events so the admin sees signal immediately.
+        // 3. Prime the dedupe set with *all* of them — including the
+        //    ones we just published — so the next poll only fires for
+        //    genuinely new alarms.
+        // This is the smallest workable "we configured it, where are
+        // my events?" fix; the proper 30-day persistence + risk
+        // model is a follow-up PR.
         match client.fetch_alarms().await {
-            Ok(initial) => {
-                let count = initial.len();
+            Ok(mut initial) => {
+                let total = initial.len();
+                // Newest-first by timestamp; alarms without a
+                // timestamp sort last (they have no claim on being
+                // "recent").
+                initial.sort_by_key(|a| std::cmp::Reverse(a.timestamp.unwrap_or(i64::MIN)));
+                let backfill_count = total.min(INITIAL_BACKFILL);
+                let mut last_summary = None;
+                for alarm in initial.iter().take(backfill_count) {
+                    let event = alarm_to_event(alarm, &client.base_url);
+                    if last_summary.is_none() {
+                        last_summary = Some(format_summary(alarm));
+                    }
+                    bus.publish(event);
+                    dedupe.observe(&alarm.id); // mark as seen before priming the rest
+                }
+                // Prime the remaining alarms so we don't republish on
+                // the next tick. (observe() is a no-op if already
+                // present, so the iter is safe.)
                 dedupe.prime(initial.into_iter().map(|a| a.id));
                 info!(
-                    primed = count,
-                    "unifi-ips: dedupe set primed with current backlog"
+                    backfilled = backfill_count,
+                    primed = total,
+                    "unifi-ips: backfilled recent alarms; dedupe primed"
                 );
+                diag.record_ok(total as u32, backfill_count as u32, last_summary);
             }
-            Err(e) => warn!(error = %e, "unifi-ips: initial alarm fetch failed (will retry)"),
+            Err(e) => {
+                warn!(error = %e, "unifi-ips: initial alarm fetch failed (will retry)");
+                diag.record_err(format!("alarm fetch failed: {e:#}"));
+            }
         }
 
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
@@ -390,34 +433,79 @@ pub fn spawn(client: UnifiIpsClient, bus: DetectionBus) -> tokio::task::AbortHan
 
         loop {
             ticker.tick().await;
-            match poll_once(&client, &bus, &mut dedupe).await {
-                Ok(n) if n > 0 => {
-                    info!(new_events = n, "unifi-ips: published new alarms")
+            match poll_with_summary(&client, &bus, &mut dedupe).await {
+                Ok(stats) => {
+                    if stats.new > 0 {
+                        info!(new_events = stats.new, "unifi-ips: published new alarms");
+                    } else {
+                        debug!("unifi-ips: no new alarms");
+                    }
+                    diag.record_ok(stats.observed, stats.new, stats.last_summary);
                 }
-                Ok(_) => debug!("unifi-ips: no new alarms"),
-                Err(e) => warn!(error = %e, "unifi-ips: poll failed"),
+                Err(e) => {
+                    warn!(error = %e, "unifi-ips: poll failed");
+                    diag.record_err(format!("{e:#}"));
+                }
             }
         }
     });
     handle.abort_handle()
 }
 
+/// Render an alarm as a one-line "last seen" string for the
+/// diagnostics panel. Truncates absurdly long messages so the UI
+/// stays tidy.
+fn format_summary(alarm: &Alarm) -> String {
+    let msg = alarm
+        .message
+        .as_deref()
+        .or(alarm.signature.as_deref())
+        .unwrap_or("UniFi IPS alarm");
+    if msg.len() > 120 {
+        format!("{}…", &msg[..120])
+    } else {
+        msg.to_string()
+    }
+}
+
+#[derive(Debug, Default)]
+struct PollStats {
+    observed: u32,
+    new: u32,
+    last_summary: Option<String>,
+}
+
 #[instrument(skip_all)]
-async fn poll_once(
+async fn poll_with_summary(
     client: &UnifiIpsClient,
     bus: &DetectionBus,
     dedupe: &mut DedupeSet,
-) -> Result<usize> {
+) -> Result<PollStats> {
     let alarms = client.fetch_alarms().await?;
-    let mut published = 0;
+    let mut stats = PollStats {
+        observed: alarms.len() as u32,
+        ..PollStats::default()
+    };
+    // Track the newest alarm we saw this tick (any alarm, whether
+    // new-to-us or not) so the diagnostics panel always shows the
+    // most recent thing the controller is reporting.
+    let mut newest_seen: Option<(i64, &Alarm)> = None;
     for alarm in &alarms {
+        if let Some(ts) = alarm.timestamp {
+            if newest_seen.map(|(t, _)| ts > t).unwrap_or(true) {
+                newest_seen = Some((ts, alarm));
+            }
+        }
         if !dedupe.observe(&alarm.id) {
             continue;
         }
         bus.publish(alarm_to_event(alarm, &client.base_url));
-        published += 1;
+        stats.new += 1;
     }
-    Ok(published)
+    if let Some((_, alarm)) = newest_seen {
+        stats.last_summary = Some(format_summary(alarm));
+    }
+    Ok(stats)
 }
 
 #[cfg(test)]

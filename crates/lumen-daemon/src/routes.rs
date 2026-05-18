@@ -15,6 +15,7 @@ use tracing::{debug, warn};
 use crate::auth::{AuthStore, User, UserSummary};
 use crate::detections::DetectionBus;
 use crate::ingest::FlowBus;
+use crate::integrations::diagnostics::IntegrationDiagnostic;
 use crate::integrations::supervisor::{self as supervisor, IntegrationSupervisor};
 use crate::metrics::{self as app_metrics, DETECTIONS, FLOWS_INGESTED, WS_CLIENTS};
 use crate::settings::{self as settings_mod, SettingsStore};
@@ -470,33 +471,30 @@ pub struct IntegrationStatusResponse {
     /// True if the supervisor currently has a running task for this
     /// integration. False = either no config or the task exited.
     pub running: bool,
+    /// Most recent poll outcome — when, success/failure, item counts,
+    /// optional one-line summary of the latest item seen. Used by the
+    /// admin UI's diagnostics panel.
+    pub diagnostics: IntegrationDiagnostic,
 }
 
-impl From<(settings_mod::IntegrationStatus, bool)> for IntegrationStatusResponse {
-    fn from((s, running): (settings_mod::IntegrationStatus, bool)) -> Self {
-        Self {
+/// `GET /admin/settings` — full snapshot of integration config (plain
+/// values + secret-set flags + runtime status + diagnostics). The
+/// admin UI polls this on page load and after every mutation.
+pub async fn list_settings(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<IntegrationStatusResponse>>, (StatusCode, Json<ApiError>)> {
+    let statuses = state.settings.all_statuses().map_err(internal_err)?;
+    let diagnostics = state.supervisor.diagnostics();
+    let resp: Vec<IntegrationStatusResponse> = statuses
+        .into_iter()
+        .map(|s| IntegrationStatusResponse {
+            running: state.supervisor.is_running(s.id),
+            diagnostics: diagnostics.get(s.id),
             id: s.id,
             plain: s.plain,
             plain_source: s.plain_source,
             secret_configured: s.secret_configured,
             secret_source: s.secret_source,
-            running,
-        }
-    }
-}
-
-/// `GET /admin/settings` — full snapshot of integration config (plain
-/// values + secret-set flags + runtime status). The admin UI polls
-/// this on page load.
-pub async fn list_settings(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<IntegrationStatusResponse>>, (StatusCode, Json<ApiError>)> {
-    let statuses = state.settings.all_statuses().map_err(internal_err)?;
-    let resp: Vec<IntegrationStatusResponse> = statuses
-        .into_iter()
-        .map(|s| {
-            let running = state.supervisor.is_running(s.id);
-            (s, running).into()
         })
         .collect();
     Ok(Json(resp))

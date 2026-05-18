@@ -5,6 +5,7 @@
 //! each integration can move to a `.wasm` shipped separately
 //! without changing the engine's public API.
 
+pub mod diagnostics;
 pub mod supervisor;
 pub mod unifi;
 pub mod unifi_ips;

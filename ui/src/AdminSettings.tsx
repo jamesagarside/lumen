@@ -1,4 +1,5 @@
 import {
+  createMemo,
   createSignal,
   For,
   Match,
@@ -10,6 +11,7 @@ import {
 } from "solid-js";
 import {
   createSettingsStore,
+  type IntegrationDiagnostic,
   type IntegrationId,
   type IntegrationStatus,
 } from "./settingsStore";
@@ -18,12 +20,14 @@ interface AdminSettingsProps {
   onClose: () => void;
 }
 
-/// Admin → Settings overlay. Modal-style: covers the screen, dimmed
-/// background, ESC to close. Mounts the settings store on open and
-/// fetches the integration status; each section component handles
-/// its own form state.
+/// Admin → Settings overlay. Sidebar layout: left rail lists every
+/// admin-managed thing (grouped by category), right pane shows the
+/// selected entry's form + a diagnostics panel. Designed so adding a
+/// new integration is "add an entry to the sidebar registry" — the
+/// shell doesn't need to change.
 const AdminSettings: Component<AdminSettingsProps> = (props) => {
   const store = createSettingsStore();
+  const [selected, setSelected] = createSignal<IntegrationId>("unifi_labels");
 
   onMount(() => {
     void store.refresh();
@@ -31,7 +35,15 @@ const AdminSettings: Component<AdminSettingsProps> = (props) => {
       if (e.key === "Escape") props.onClose();
     };
     window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    // Refresh status every 5s so diagnostics stay live without the
+    // user having to re-save. 5s lines up nicely with the slowest
+    // integration's poll interval (UniFi labels = 60s; UniFi IPS =
+    // 30s) while keeping the panel feeling alive.
+    const poll = window.setInterval(() => void store.refresh(), 5000);
+    return () => {
+      window.removeEventListener("keydown", handler);
+      window.clearInterval(poll);
+    };
   });
 
   const byId = (id: IntegrationId): IntegrationStatus | undefined =>
@@ -44,12 +56,12 @@ const AdminSettings: Component<AdminSettingsProps> = (props) => {
         if (e.target === e.currentTarget) props.onClose();
       }}
     >
-      <div class="w-full max-w-3xl bg-zinc-950 border border-zinc-800 rounded-md shadow-2xl">
-        <header class="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
+      <div class="w-full max-w-4xl bg-zinc-950 border border-zinc-800 rounded-md shadow-2xl flex flex-col max-h-[85vh]">
+        <header class="flex items-center justify-between px-6 py-4 border-b border-zinc-800 flex-shrink-0">
           <div>
             <h2 class="text-sm font-semibold tracking-tight text-zinc-100">Settings</h2>
             <p class="text-[10px] text-zinc-500 mt-0.5">
-              Integration credentials and webhooks. Secrets are encrypted at rest.
+              Manage integrations, secrets, and platform configuration.
             </p>
           </div>
           <button
@@ -70,35 +82,44 @@ const AdminSettings: Component<AdminSettingsProps> = (props) => {
           )}
         </Show>
 
-        <div class="px-6 py-4 space-y-6">
-          <Switch>
-            <Match when={store.loading() && !store.statuses()}>
-              <p class="text-[10px] text-zinc-600">loading…</p>
-            </Match>
-            <Match when={store.statuses()}>
-              <UnifiLabelsSection
-                status={byId("unifi_labels")}
-                onSave={store.saveUnifiLabels}
-                onClear={() => store.clear("unifi_labels")}
-              />
-              <UnifiIpsSection
-                status={byId("unifi_ips")}
-                onSave={store.saveUnifiIps}
-                onClear={() => store.clear("unifi_ips")}
-              />
-              <WebhookSection
-                status={byId("webhook")}
-                onSave={store.saveWebhook}
-                onClear={() => store.clear("webhook")}
-              />
-            </Match>
-          </Switch>
+        <div class="flex-1 min-h-0 flex">
+          <Sidebar
+            statuses={store.statuses()}
+            selected={selected()}
+            onSelect={setSelected}
+          />
+          <main class="flex-1 min-h-0 overflow-y-auto px-6 py-5">
+            <Switch>
+              <Match when={store.loading() && !store.statuses()}>
+                <p class="text-[10px] text-zinc-600">loading…</p>
+              </Match>
+              <Match when={store.statuses() && selected() === "unifi_labels"}>
+                <UnifiLabelsSection
+                  status={byId("unifi_labels")}
+                  onSave={store.saveUnifiLabels}
+                  onClear={() => store.clear("unifi_labels")}
+                />
+              </Match>
+              <Match when={store.statuses() && selected() === "unifi_ips"}>
+                <UnifiIpsSection
+                  status={byId("unifi_ips")}
+                  onSave={store.saveUnifiIps}
+                  onClear={() => store.clear("unifi_ips")}
+                />
+              </Match>
+              <Match when={store.statuses() && selected() === "webhook"}>
+                <WebhookSection
+                  status={byId("webhook")}
+                  onSave={store.saveWebhook}
+                  onClear={() => store.clear("webhook")}
+                />
+              </Match>
+            </Switch>
+          </main>
         </div>
 
-        <footer class="px-6 py-3 border-t border-zinc-800 text-[10px] text-zinc-600 flex items-center justify-between">
-          <span>
-            Changes take effect immediately — pollers restart in place.
-          </span>
+        <footer class="px-6 py-3 border-t border-zinc-800 text-[10px] text-zinc-600 flex items-center justify-between flex-shrink-0">
+          <span>Changes take effect immediately — pollers restart in place.</span>
           <Show when={store.loading() && store.statuses()}>
             <span class="text-amber-400">refreshing…</span>
           </Show>
@@ -108,7 +129,113 @@ const AdminSettings: Component<AdminSettingsProps> = (props) => {
   );
 };
 
-// ── Section shell ────────────────────────────────────────────────────────────
+// ── Sidebar ──────────────────────────────────────────────────────────────────
+
+interface SidebarEntry {
+  id: IntegrationId;
+  label: string;
+  /** Free-form short tag rendered under the label, e.g. "UniFi · labels". */
+  badge: string;
+}
+
+interface SidebarGroup {
+  title: string;
+  entries: SidebarEntry[];
+  /** When present, rendered as a muted hint below the group title. */
+  hint?: string;
+}
+
+/// The single place to register new integrations / settings pages.
+/// Adding a section is two changes: append an entry here and add a
+/// <Match> in the main shell above.
+const SIDEBAR_GROUPS: SidebarGroup[] = [
+  {
+    title: "Integrations",
+    hint: "Read from / write to third-party systems.",
+    entries: [
+      { id: "unifi_labels", label: "UniFi auto-label", badge: "UniFi · labels" },
+      { id: "unifi_ips", label: "UniFi IPS alerts", badge: "UniFi · detections" },
+      { id: "webhook", label: "Detection webhook", badge: "Outbound · notifications" },
+    ],
+  },
+  // Future groups land here without code changes to the shell:
+  //   { title: "Platform", entries: [{ id: "master_key", ... }] }
+  //   { title: "Users",    entries: [{ id: "users", ... }] }
+];
+
+const Sidebar: Component<{
+  statuses: IntegrationStatus[] | null;
+  selected: IntegrationId;
+  onSelect: (id: IntegrationId) => void;
+}> = (props) => {
+  const findStatus = (id: IntegrationId) => props.statuses?.find((s) => s.id === id);
+
+  return (
+    <nav class="w-56 border-r border-zinc-800/80 px-3 py-4 flex-shrink-0 overflow-y-auto">
+      <For each={SIDEBAR_GROUPS}>
+        {(group) => (
+          <div class="mb-5 last:mb-0">
+            <h3 class="text-[9px] uppercase tracking-wider text-zinc-500 px-2 mb-1.5">
+              {group.title}
+            </h3>
+            <Show when={group.hint}>
+              <p class="text-[9px] text-zinc-600 px-2 mb-2">{group.hint}</p>
+            </Show>
+            <ul class="space-y-px">
+              <For each={group.entries}>
+                {(entry) => (
+                  <SidebarItem
+                    entry={entry}
+                    status={findStatus(entry.id)}
+                    active={props.selected === entry.id}
+                    onSelect={() => props.onSelect(entry.id)}
+                  />
+                )}
+              </For>
+            </ul>
+          </div>
+        )}
+      </For>
+    </nav>
+  );
+};
+
+const SidebarItem: Component<{
+  entry: SidebarEntry;
+  status: IntegrationStatus | undefined;
+  active: boolean;
+  onSelect: () => void;
+}> = (props) => {
+  const dotClass = () => {
+    const s = props.status;
+    if (!s) return "bg-zinc-700";
+    if (s.running) return "bg-emerald-400";
+    if (s.plain_source || s.secret_configured) return "bg-amber-400";
+    return "bg-zinc-700";
+  };
+
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={props.onSelect}
+        class="w-full text-left px-2 py-1.5 rounded text-[11px] transition-colors flex items-start gap-2"
+        classList={{
+          "bg-zinc-900 text-zinc-100": props.active,
+          "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60": !props.active,
+        }}
+      >
+        <span class={`size-1.5 rounded-full mt-1.5 flex-shrink-0 ${dotClass()}`} />
+        <span class="flex-1 min-w-0">
+          <span class="block">{props.entry.label}</span>
+          <span class="block text-[9px] text-zinc-600 mt-0.5">{props.entry.badge}</span>
+        </span>
+      </button>
+    </li>
+  );
+};
+
+// ── Section shell + status badges ────────────────────────────────────────────
 
 interface SectionProps {
   title: string;
@@ -118,17 +245,16 @@ interface SectionProps {
 }
 
 const Section: Component<SectionProps> = (props) => (
-  <section class="border border-zinc-800/80 rounded-md">
-    <header class="px-4 py-3 border-b border-zinc-800/80 flex items-start justify-between gap-4">
+  <section class="space-y-4">
+    <header class="flex items-start justify-between gap-4">
       <div>
-        <h3 class="text-[11px] font-semibold tracking-tight text-zinc-200 uppercase">
-          {props.title}
-        </h3>
-        <p class="text-[10px] text-zinc-500 mt-1">{props.description}</p>
+        <h3 class="text-sm font-semibold text-zinc-100">{props.title}</h3>
+        <p class="text-[10px] text-zinc-500 mt-1 max-w-prose">{props.description}</p>
       </div>
       <StatusBadges status={props.status} />
     </header>
-    <div class="px-4 py-4">{props.children}</div>
+    <div class="space-y-4">{props.children}</div>
+    <DiagnosticsPanel status={props.status} />
   </section>
 );
 
@@ -144,7 +270,6 @@ const StatusBadges: Component<{ status: IntegrationStatus | undefined }> = (prop
     } else {
       out.push({ text: "not configured", tone: "muted" });
     }
-    // Distinguish env-sourced (read-only) from db-sourced configuration.
     if (s.plain_source === "env" || s.secret_source === "env") {
       out.push({ text: "from .env", tone: "info" });
     }
@@ -172,7 +297,109 @@ const StatusBadges: Component<{ status: IntegrationStatus | undefined }> = (prop
   );
 };
 
-// ── Reusable form bits ───────────────────────────────────────────────────────
+// ── Diagnostics panel ────────────────────────────────────────────────────────
+
+const formatRelative = (epochMillis: number): string => {
+  const seconds = Math.max(0, Math.round((Date.now() - epochMillis) / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return `${hours}h ago`;
+};
+
+const DiagnosticsPanel: Component<{ status: IntegrationStatus | undefined }> = (props) => {
+  const diag = createMemo<IntegrationDiagnostic | undefined>(() => props.status?.diagnostics);
+  const running = () => !!props.status?.running;
+  const configured = () =>
+    !!props.status?.plain_source || !!props.status?.secret_configured;
+
+  return (
+    <Show when={configured()}>
+      <div class="mt-4 border-t border-zinc-800/80 pt-4">
+        <h4 class="text-[9px] uppercase tracking-wider text-zinc-500 mb-2">Diagnostics</h4>
+        <Switch
+          fallback={
+            <p class="text-[10px] text-zinc-600">
+              {running()
+                ? "Waiting for the first poll to complete…"
+                : "Integration is stopped."}
+            </p>
+          }
+        >
+          <Match when={diag()?.last_outcome?.status === "ok"}>
+            <DiagnosticOk diag={diag()!} />
+          </Match>
+          <Match when={diag()?.last_outcome?.status === "err"}>
+            <DiagnosticErr diag={diag()!} />
+          </Match>
+        </Switch>
+      </div>
+    </Show>
+  );
+};
+
+const DiagnosticOk: Component<{ diag: IntegrationDiagnostic }> = (props) => {
+  const outcome = () => {
+    const o = props.diag.last_outcome;
+    return o?.status === "ok" ? o : null;
+  };
+  return (
+    <div class="space-y-1.5 text-[10px] text-zinc-400">
+      <p>
+        <span class="text-emerald-400">●</span>{" "}
+        <span class="text-zinc-200">Last poll</span>
+        <Show when={props.diag.last_poll_at}>
+          {(t) => <span class="text-zinc-500"> · {formatRelative(t())}</span>}
+        </Show>
+        <Show when={outcome()}>
+          {(o) => (
+            <span class="text-zinc-500">
+              {" · "}
+              {o().observed} observed
+              {o().new > 0 && (
+                <span class="text-amber-300"> · {o().new} new this poll</span>
+              )}
+            </span>
+          )}
+        </Show>
+      </p>
+      <Show when={props.diag.last_item_summary}>
+        {(summary) => (
+          <p class="text-zinc-500 truncate" title={summary()}>
+            most recent: <span class="text-zinc-300">{summary()}</span>
+          </p>
+        )}
+      </Show>
+    </div>
+  );
+};
+
+const DiagnosticErr: Component<{ diag: IntegrationDiagnostic }> = (props) => {
+  const outcome = () => {
+    const o = props.diag.last_outcome;
+    return o?.status === "err" ? o : null;
+  };
+  return (
+    <div class="space-y-1.5 text-[10px] text-zinc-400">
+      <p>
+        <span class="text-rose-400">●</span>{" "}
+        <span class="text-zinc-200">Last poll failed</span>
+        <Show when={props.diag.last_poll_at}>
+          {(t) => <span class="text-zinc-500"> · {formatRelative(t())}</span>}
+        </Show>
+      </p>
+      <Show when={outcome()}>
+        {(o) => (
+          <p class="text-rose-300 font-mono text-[10px] break-words">{o().message}</p>
+        )}
+      </Show>
+    </div>
+  );
+};
+
+// ── Form primitives ──────────────────────────────────────────────────────────
 
 const Field: Component<{
   label: string;
@@ -216,7 +443,7 @@ const FormActions: Component<{
   envLocked: boolean;
   onClear: () => void;
 }> = (props) => (
-  <div class="flex items-center gap-2 mt-4">
+  <div class="flex items-center gap-2 mt-2">
     <button
       type="submit"
       class="text-[10px] uppercase tracking-wider px-3 py-1.5 bg-amber-500/20 text-amber-200 border border-amber-700/50 rounded hover:bg-amber-500/30 disabled:opacity-40"
@@ -261,9 +488,6 @@ const UnifiLabelsSection: Component<{
     try {
       await props.onSave({
         url: url(),
-        // Omit the API key field entirely when the user left it blank
-        // — otherwise we'd clear the existing one. The backend treats
-        // empty as "clear" and missing as "keep current".
         ...(apiKey() ? { api_key: apiKey() } : {}),
       });
       setApiKey("");
@@ -282,7 +506,7 @@ const UnifiLabelsSection: Component<{
   return (
     <Section
       title="UniFi auto-label"
-      description="Reads the Network Integration API every 60s to populate device names. UniFi Network ≥ 9.0."
+      description="Reads the Network Integration API every 60 seconds to populate device names. UniFi Network ≥ 9.0 with an Integrations API key."
       status={props.status}
     >
       <form onSubmit={submit} class="space-y-3">
@@ -380,7 +604,7 @@ const UnifiIpsSection: Component<{
   return (
     <Section
       title="UniFi IPS alerts"
-      description="Polls Threat Management alarms every 30s and surfaces them as detection events. Legacy controller auth (username + password)."
+      description="Polls Threat Management alarms every 30 seconds and surfaces them as detection events. Legacy controller auth — needs a UniFi user with at least 'View Only' on Network."
       status={props.status}
     >
       <form onSubmit={submit} class="space-y-3">
@@ -395,10 +619,7 @@ const UnifiIpsSection: Component<{
           />
         </Field>
         <div class="grid grid-cols-2 gap-3">
-          <Field
-            label="Username"
-            hint="Local UniFi user with at least 'View Only' on Network."
-          >
+          <Field label="Username">
             <input
               type="text"
               class={inputClass}

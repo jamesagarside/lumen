@@ -8,6 +8,18 @@ export type IntegrationId = "unifi_labels" | "unifi_ips" | "webhook";
 
 export type ConfigSource = "db" | "env";
 
+export type PollOutcome =
+  | { status: "ok"; observed: number; new: number }
+  | { status: "err"; message: string };
+
+export interface IntegrationDiagnostic {
+  /** Unix epoch milliseconds, or null if the integration never polled. */
+  last_poll_at: number | null;
+  last_outcome: PollOutcome | null;
+  /** Short summary of the most recent item seen, if any. */
+  last_item_summary?: string;
+}
+
 export interface IntegrationStatus {
   id: IntegrationId;
   plain: Record<string, string | null | undefined>;
@@ -15,6 +27,7 @@ export interface IntegrationStatus {
   secret_configured: boolean;
   secret_source: ConfigSource | null;
   running: boolean;
+  diagnostics: IntegrationDiagnostic;
 }
 
 export interface UnifiLabelsPayload {

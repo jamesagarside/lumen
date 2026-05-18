@@ -21,6 +21,7 @@ use lumen_core::NodeId;
 use serde::Deserialize;
 use tracing::{debug, info, instrument, warn};
 
+use crate::integrations::diagnostics::Recorder;
 use crate::state::LiveStateEngine;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -167,7 +168,11 @@ impl UnifiClient {
 /// The task runs forever; if a poll fails we log and try again on
 /// the next tick. Returns an `AbortHandle` so the supervisor can
 /// tear the task down when settings change.
-pub fn spawn(client: UnifiClient, engine: LiveStateEngine) -> tokio::task::AbortHandle {
+pub fn spawn(
+    client: UnifiClient,
+    engine: LiveStateEngine,
+    diag: Recorder,
+) -> tokio::task::AbortHandle {
     let handle = tokio::spawn(async move {
         info!(
             interval_secs = POLL_INTERVAL.as_secs(),
@@ -180,18 +185,27 @@ pub fn spawn(client: UnifiClient, engine: LiveStateEngine) -> tokio::task::Abort
         loop {
             ticker.tick().await;
             match poll_once(&client, &engine).await {
-                Ok(stats) if stats.labelled > 0 => info!(
-                    sites = stats.sites,
-                    clients = stats.clients,
-                    labelled = stats.labelled,
-                    "unifi: labels refreshed"
-                ),
-                Ok(stats) => debug!(
-                    sites = stats.sites,
-                    clients = stats.clients,
-                    "unifi: nothing to label this tick"
-                ),
-                Err(e) => warn!(error = %e, "unifi: poll failed"),
+                Ok(stats) => {
+                    if stats.labelled > 0 {
+                        info!(
+                            sites = stats.sites,
+                            clients = stats.clients,
+                            labelled = stats.labelled,
+                            "unifi: labels refreshed"
+                        );
+                    } else {
+                        debug!(
+                            sites = stats.sites,
+                            clients = stats.clients,
+                            "unifi: nothing to label this tick"
+                        );
+                    }
+                    diag.record_ok(stats.clients as u32, stats.labelled as u32, None);
+                }
+                Err(e) => {
+                    warn!(error = %e, "unifi: poll failed");
+                    diag.record_err(format!("{e:#}"));
+                }
             }
         }
     });

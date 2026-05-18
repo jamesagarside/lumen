@@ -21,6 +21,7 @@ use crate::detections::DetectionBus;
 use crate::settings::SettingsStore;
 use crate::state::LiveStateEngine;
 
+use super::diagnostics::Diagnostics;
 use super::{unifi, unifi_ips, webhook};
 
 /// Names match `settings::id::*` so the API and logs use the same
@@ -50,6 +51,7 @@ struct Inner {
     engine: LiveStateEngine,
     detections: DetectionBus,
     settings: SettingsStore,
+    diagnostics: Diagnostics,
 }
 
 impl IntegrationSupervisor {
@@ -60,8 +62,16 @@ impl IntegrationSupervisor {
                 engine,
                 detections,
                 settings,
+                diagnostics: Diagnostics::new(),
             }),
         }
+    }
+
+    /// Diagnostics handle for the admin API to read most-recent-poll
+    /// outcomes from. Each integration's spawn() is wired up here
+    /// with a private recorder.
+    pub fn diagnostics(&self) -> Diagnostics {
+        self.inner.diagnostics.clone()
     }
 
     /// Boot every integration that currently has a complete config.
@@ -95,7 +105,8 @@ impl IntegrationSupervisor {
         };
         match unifi::UnifiClient::new(cfg.url.clone(), cfg.api_key.clone()) {
             Ok(client) => {
-                let handle = unifi::spawn(client, self.inner.engine.clone());
+                let recorder = self.inner.diagnostics.recorder_for(kind::UNIFI_LABELS);
+                let handle = unifi::spawn(client, self.inner.engine.clone(), recorder);
                 info!(kind = kind::UNIFI_LABELS, url = %cfg.url, "supervisor: started");
                 self.inner.slots.lock().unwrap().unifi_labels = Some(handle);
             }
@@ -122,7 +133,8 @@ impl IntegrationSupervisor {
             cfg.password.clone(),
         ) {
             Ok(client) => {
-                let handle = unifi_ips::spawn(client, self.inner.detections.clone());
+                let recorder = self.inner.diagnostics.recorder_for(kind::UNIFI_IPS);
+                let handle = unifi_ips::spawn(client, self.inner.detections.clone(), recorder);
                 info!(
                     kind = kind::UNIFI_IPS,
                     url = %cfg.controller_url,
@@ -147,7 +159,10 @@ impl IntegrationSupervisor {
             );
             return Ok(());
         };
-        if let Some(handle) = webhook::spawn(cfg.url.clone(), self.inner.detections.clone()) {
+        let recorder = self.inner.diagnostics.recorder_for(kind::WEBHOOK);
+        if let Some(handle) =
+            webhook::spawn(cfg.url.clone(), self.inner.detections.clone(), recorder)
+        {
             info!(kind = kind::WEBHOOK, url = %cfg.url, "supervisor: started");
             self.inner.slots.lock().unwrap().webhook = Some(handle);
         }
@@ -172,6 +187,10 @@ impl IntegrationSupervisor {
         if let Some(handle) = slot.take() {
             handle.abort();
             info!(kind = name, "supervisor: stopped");
+            // Clear stale diagnostics so the UI doesn't keep showing
+            // "last poll: 5min ago" for an integration that's not
+            // running anymore.
+            self.inner.diagnostics.clear(name);
         }
     }
 
