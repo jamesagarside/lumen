@@ -15,9 +15,11 @@ import FlowTable from "./FlowTable";
 import Login from "./Login";
 import NodeInspector from "./NodeInspector";
 import SigmaGraph from "./SigmaGraph";
+import TimeScrubber from "./TimeScrubber";
 import { createAuthStore } from "./authStore";
 import { createEventsStore } from "./eventsStore";
 import { createFlowStore } from "./flowStore";
+import { createScrubStore } from "./scrubStore";
 import { createSnapshotStore } from "./snapshotStore";
 import type { ViewKind } from "./layouts";
 import type { VersionInfo } from "./types";
@@ -99,11 +101,18 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
   const flowStore = createFlowStore(wsUrl());
   const snapshotStore = createSnapshotStore();
   const eventsStore = createEventsStore();
+  const scrubStore = createScrubStore();
   const [selectedNode, setSelectedNode] = createSignal<string | null>(null);
   const [relayoutTick, setRelayoutTick] = createSignal(0);
   const [pane, setPane] = createSignal<RightPane>("flows");
   const [view, setView] = createSignal<ViewKind>("graph");
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+
+  // While scrubbed back in time, the inspector + graph read from the
+  // historical reconstruction instead of the live snapshot poll. Live
+  // mode flips back to the snapshot store seamlessly.
+  const effectiveSnapshot = () =>
+    scrubStore.isLive() ? snapshotStore.snapshot() : scrubStore.scrubbedSnapshot();
 
   // Cmd/Ctrl-1/2/3 shortcuts for view switching. Mounted on
   // window so they fire regardless of focus, except when the user
@@ -123,12 +132,14 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
     flowStore.connect();
     snapshotStore.start();
     eventsStore.start();
+    scrubStore.start();
     window.addEventListener("keydown", onKey);
   });
   onCleanup(() => {
     flowStore.disconnect();
     snapshotStore.stop();
     eventsStore.stop();
+    scrubStore.stop();
     window.removeEventListener("keydown", onKey);
   });
 
@@ -141,7 +152,7 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
   const isKiosk = () => kioskFromUrl() || props.userRole === "noc_display";
 
   const totalBytesPerSec = () => {
-    const s = snapshotStore.snapshot();
+    const s = effectiveSnapshot();
     if (!s) return 0;
     return s.edges.reduce((sum, e) => sum + e.bytes_per_sec, 0);
   };
@@ -172,7 +183,7 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
               </span>
             )}
           </Show>
-          <TopologyStat snapshot={snapshotStore.snapshot()} totalBps={totalBytesPerSec()} />
+          <TopologyStat snapshot={effectiveSnapshot()} totalBps={totalBytesPerSec()} />
           <ViewSwitcher value={view()} onChange={setView} />
           <button
             type="button"
@@ -215,15 +226,20 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
           "grid-cols-1": isKiosk(),
         }}
       >
-        <section class="bg-zinc-950 min-h-0 overflow-hidden">
-          <SigmaGraph
-            snapshot={snapshotStore.snapshot()}
-            events={eventsStore.events()}
-            selectedNodeId={selectedNode()}
-            onSelectionChange={setSelectedNode}
-            relayoutSignal={relayoutTick()}
-            view={view()}
-          />
+        <section class="bg-zinc-950 min-h-0 overflow-hidden flex flex-col">
+          <div class="flex-1 min-h-0 relative">
+            <SigmaGraph
+              snapshot={effectiveSnapshot()}
+              events={eventsStore.events()}
+              selectedNodeId={selectedNode()}
+              onSelectionChange={setSelectedNode}
+              relayoutSignal={relayoutTick()}
+              view={view()}
+            />
+          </div>
+          <Show when={!isKiosk()}>
+            <TimeScrubber scrub={scrubStore} />
+          </Show>
         </section>
         <Show when={!isKiosk()}>
         <section class="bg-zinc-950 min-h-0 overflow-hidden flex flex-col">
@@ -268,7 +284,7 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
             }
           >
             <NodeInspector
-              snapshot={snapshotStore.snapshot()}
+              snapshot={effectiveSnapshot()}
               selectedId={selectedNode()}
               onClose={() => setSelectedNode(null)}
               onLabelSaved={() => {

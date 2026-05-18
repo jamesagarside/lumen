@@ -118,6 +118,32 @@ impl RollingBuffer {
         collected.into_iter()
     }
 
+    /// Same as `query` but pairs each `Flow` with its `arrived` timestamp.
+    /// The time scrubber (`state::scrub`) needs original arrival times to
+    /// reconstruct historical snapshots and to compute windowed rates at
+    /// the playhead.
+    pub fn query_stamped(
+        &self,
+        start: SystemTime,
+        end: SystemTime,
+    ) -> impl ExactSizeIterator<Item = (Flow, SystemTime)> {
+        let deque = self.inner.deque.read().expect("rolling buffer poisoned");
+        let collected: Vec<(Flow, SystemTime)> = deque
+            .iter()
+            .filter(|s| s.arrived >= start && s.arrived <= end)
+            .map(|s| (s.flow.clone(), s.arrived))
+            .collect();
+        collected.into_iter()
+    }
+
+    /// Arrival timestamp of the oldest buffered flow, or `None` if empty.
+    /// The scrubber UI uses this to draw the left edge of the timeline
+    /// at the actual data start rather than a theoretical "now - window".
+    pub fn earliest(&self) -> Option<SystemTime> {
+        let deque = self.inner.deque.read().expect("rolling buffer poisoned");
+        deque.front().map(|s| s.arrived)
+    }
+
     /// Current number of buffered flows. Mostly for tests + metrics.
     pub fn len(&self) -> usize {
         self.inner
