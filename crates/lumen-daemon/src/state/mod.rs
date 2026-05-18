@@ -11,6 +11,9 @@
 
 pub mod diff;
 pub mod rate;
+pub mod rolling_buffer;
+
+pub use rolling_buffer::{Bounds as RollingBufferBounds, RollingBuffer};
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};

@@ -406,25 +406,11 @@ mod tests {
         (dir, store)
     }
 
-    /// Wipe any env vars the tests might collide with. Tests touch
-    /// real process env so we keep the mutations narrow.
-    fn clear_env() {
-        for k in [
-            "UDM_URL",
-            "UDM_API_KEY",
-            "UDM_CONTROLLER_URL",
-            "UDM_USERNAME",
-            "UDM_PASSWORD",
-            "UDM_SITE",
-            "LUMEN_DETECTION_WEBHOOK_URL",
-        ] {
-            unsafe { std::env::remove_var(k) };
-        }
-    }
+    use crate::test_env::clear_env;
 
     #[test]
     fn unifi_labels_round_trip() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         assert!(store.get_unifi_labels().unwrap().is_none());
         store
@@ -440,7 +426,7 @@ mod tests {
 
     #[test]
     fn unifi_ips_round_trip_with_default_site() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         store
             .set_unifi_ips(
@@ -459,7 +445,7 @@ mod tests {
 
     #[test]
     fn unifi_ips_returns_none_when_password_missing() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         store
             .set_unifi_ips(
@@ -474,7 +460,7 @@ mod tests {
 
     #[test]
     fn env_fills_in_for_unconfigured_db() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         unsafe {
             std::env::set_var("UDM_URL", "https://from-env/sites");
@@ -487,12 +473,11 @@ mod tests {
         assert_eq!(status.plain_source, Some(Source::Env));
         assert_eq!(status.secret_source, Some(Source::Env));
         assert!(status.secret_configured);
-        clear_env();
     }
 
     #[test]
     fn db_overrides_env_when_both_set() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         unsafe {
             std::env::set_var("UDM_URL", "https://from-env/sites");
@@ -510,12 +495,11 @@ mod tests {
         let status = store.unifi_labels_status().unwrap();
         assert_eq!(status.plain_source, Some(Source::Db));
         assert_eq!(status.secret_source, Some(Source::Db));
-        clear_env();
     }
 
     #[test]
     fn clear_removes_both_plain_and_secret() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         store
             .set_unifi_labels(Some("https://x/sites".to_string()), Some("k".to_string()))
@@ -529,7 +513,7 @@ mod tests {
 
     #[test]
     fn webhook_url_round_trip() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         store
             .set_webhook(Some("https://hooks.slack.com/services/x".to_string()))
@@ -540,7 +524,7 @@ mod tests {
 
     #[test]
     fn all_statuses_covers_three_integrations() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         let statuses = store.all_statuses().unwrap();
         let ids: Vec<&str> = statuses.iter().map(|s| s.id).collect();
@@ -549,7 +533,7 @@ mod tests {
 
     #[test]
     fn status_never_contains_secret_value() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         store
             .set_unifi_labels(
@@ -568,7 +552,7 @@ mod tests {
 
     #[test]
     fn empty_strings_are_treated_as_unset() {
-        clear_env();
+        let _g = clear_env();
         let (_dir, store) = open_store();
         store
             .set_unifi_labels(Some("".to_string()), Some("".to_string()))

@@ -19,7 +19,7 @@ use crate::integrations::diagnostics::IntegrationDiagnostic;
 use crate::integrations::supervisor::{self as supervisor, IntegrationSupervisor};
 use crate::metrics::{self as app_metrics, DETECTIONS, FLOWS_INGESTED, WS_CLIENTS};
 use crate::settings::{self as settings_mod, SettingsStore};
-use crate::state::LiveStateEngine;
+use crate::state::{LiveStateEngine, RollingBuffer};
 
 const SESSION_COOKIE: &str = "lumen_session";
 
@@ -34,6 +34,11 @@ pub struct AppState {
     pub ingest_api_key: Option<Arc<str>>,
     pub settings: SettingsStore,
     pub supervisor: IntegrationSupervisor,
+    /// Time- and memory-bounded ring of raw flows (#20). Powers the
+    /// time-scrubber (#26) and feeds the rollup engine (#21). Wired
+    /// up now so producers feed it from day one; readers land with #26.
+    #[allow(dead_code)]
+    pub raw_buffer: RollingBuffer,
 }
 
 #[derive(Serialize)]

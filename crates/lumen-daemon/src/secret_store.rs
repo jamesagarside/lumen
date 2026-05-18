@@ -376,6 +376,7 @@ mod tests {
 
     #[test]
     fn master_key_file_is_created_with_0600_on_first_run() {
+        let _guard = crate::test_env::clear_env();
         let dir = tempdir().unwrap();
         let _key = load_or_create_master_key(dir.path()).unwrap();
         let path = dir.path().join(MASTER_KEY_FILE);
@@ -393,6 +394,7 @@ mod tests {
 
     #[test]
     fn master_key_file_reuses_on_subsequent_runs() {
+        let _guard = crate::test_env::clear_env();
         let dir = tempdir().unwrap();
         let a = load_or_create_master_key(dir.path()).unwrap();
         let b = load_or_create_master_key(dir.path()).unwrap();
@@ -401,15 +403,10 @@ mod tests {
 
     #[test]
     fn master_key_env_overrides_file() {
+        let _guard = crate::test_env::clear_env();
         let dir = tempdir().unwrap();
-        // Pre-create a file key.
         let file_key = load_or_create_master_key(dir.path()).unwrap();
         let env_key = [42u8; KEY_LEN];
-        // Set + clear the env var around the test (no other test
-        // reads this var so serial isolation isn't critical, but we
-        // still clean up).
-        // SAFETY: tests don't run multi-threaded by default within a
-        // single #[test], and other tests don't touch this var.
         unsafe {
             std::env::set_var(MASTER_KEY_ENV, hex::encode(env_key));
         }
@@ -423,6 +420,7 @@ mod tests {
 
     #[test]
     fn master_key_env_rejects_wrong_length() {
+        let _guard = crate::test_env::clear_env();
         let dir = tempdir().unwrap();
         unsafe {
             std::env::set_var(MASTER_KEY_ENV, "deadbeef");
