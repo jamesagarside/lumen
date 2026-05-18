@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, warn};
 
-use crate::auth::{AuthStore, User, UserSummary};
+use crate::auth::{cap as caps, AuthStore, Role, User, UserSummary};
 use crate::detections::DetectionBus;
 use crate::ingest::FlowBus;
 use crate::integrations::diagnostics::IntegrationDiagnostic;
@@ -699,6 +699,301 @@ pub async fn delete_webhook(
     state.settings.clear_webhook().map_err(internal_err)?;
     audit_settings_write(user_ext.as_deref(), "webhook", "clear");
     state.supervisor.reload_webhook().map_err(internal_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Admin: user management ──────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct UserDetail {
+    pub id: String,
+    pub email: String,
+    pub role: Role,
+    pub created_at_secs: u64,
+}
+
+impl From<&User> for UserDetail {
+    fn from(u: &User) -> Self {
+        Self {
+            id: u.id.clone(),
+            email: u.email.clone(),
+            role: u.role,
+            created_at_secs: u
+                .created_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct CapabilityInfo {
+    pub id: &'static str,
+    pub description: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct RoleInfo {
+    pub id: Role,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub capabilities: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+pub struct RolesResponse {
+    pub roles: Vec<RoleInfo>,
+    pub capabilities: Vec<CapabilityInfo>,
+}
+
+/// `GET /admin/roles` — static reference describing every role and the
+/// capability vocabulary. The admin UI uses this to render a permission
+/// matrix without having to hard-code the table.
+pub async fn list_roles() -> Json<RolesResponse> {
+    Json(RolesResponse {
+        roles: vec![
+            RoleInfo {
+                id: Role::Admin,
+                label: "Admin",
+                description: "Full control: manage users, settings, and ingest.",
+                capabilities: Role::Admin.capabilities().to_vec(),
+            },
+            RoleInfo {
+                id: Role::Operator,
+                label: "Operator",
+                description:
+                    "Day-to-day operator: edit device names + positions, push flows + detections.",
+                capabilities: Role::Operator.capabilities().to_vec(),
+            },
+            RoleInfo {
+                id: Role::Viewer,
+                label: "Viewer",
+                description: "Read-only access to the graph and detections.",
+                capabilities: Role::Viewer.capabilities().to_vec(),
+            },
+            RoleInfo {
+                id: Role::NocDisplay,
+                label: "NOC Display",
+                description: "Read-only kiosk variant. Same caps as Viewer, stripped chrome.",
+                capabilities: Role::NocDisplay.capabilities().to_vec(),
+            },
+        ],
+        capabilities: vec![
+            CapabilityInfo {
+                id: caps::VIEW_GRAPH,
+                description: "See the live topology graph and historical snapshots.",
+            },
+            CapabilityInfo {
+                id: caps::VIEW_DETECTIONS,
+                description: "See detection events in the sidebar and on node halos.",
+            },
+            CapabilityInfo {
+                id: caps::EDIT_DEVICE_LABELS,
+                description: "Rename devices in the graph.",
+            },
+            CapabilityInfo {
+                id: caps::EDIT_DEVICE_POSITIONS,
+                description: "Drag nodes to pinned positions.",
+            },
+            CapabilityInfo {
+                id: caps::INGEST_FLOWS,
+                description: "POST flow records to /ingest/flows.",
+            },
+            CapabilityInfo {
+                id: caps::INGEST_DETECTIONS,
+                description: "POST detection events to /ingest/events.",
+            },
+            CapabilityInfo {
+                id: caps::MANAGE_USERS,
+                description: "Create, edit, and remove user accounts; change roles.",
+            },
+            CapabilityInfo {
+                id: caps::MANAGE_SETTINGS,
+                description: "Configure integration credentials, OIDC, webhooks.",
+            },
+        ],
+    })
+}
+
+/// `GET /admin/users` — list every user.
+pub async fn list_users(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<UserDetail>>, (StatusCode, Json<ApiError>)> {
+    let users = state.auth.list_users().map_err(internal_err)?;
+    Ok(Json(users.iter().map(UserDetail::from).collect()))
+}
+
+#[derive(Deserialize)]
+pub struct CreateUserPayload {
+    pub email: String,
+    pub password: String,
+    pub role: Role,
+}
+
+/// `POST /admin/users` — create a user. Auditable.
+pub async fn create_user(
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+    Json(p): Json<CreateUserPayload>,
+) -> Result<(StatusCode, Json<UserDetail>), (StatusCode, Json<ApiError>)> {
+    let trimmed_email = p.email.trim().to_string();
+    let user = state
+        .auth
+        .create_user(&trimmed_email, &p.password, p.role)
+        .map_err(bad_request_err)?;
+    audit_users_write(user_ext.as_deref(), &user.id, "create");
+    Ok((StatusCode::CREATED, Json((&user).into())))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateUserPayload {
+    /// New role. Omitted = leave unchanged.
+    #[serde(default)]
+    pub role: Option<Role>,
+    /// New password. Omitted = leave unchanged. Empty string is also
+    /// treated as "leave alone" — admins commonly clear the field
+    /// after editing a role.
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// `PATCH /admin/users/:id` — update role and/or password.
+pub async fn patch_user(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+    Json(p): Json<UpdateUserPayload>,
+) -> Result<Json<UserDetail>, (StatusCode, Json<ApiError>)> {
+    if p.role.is_none() && p.password.as_deref().is_none_or(str::is_empty) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "request body must include a new role or a new password".to_string(),
+            }),
+        ));
+    }
+    let mut updated: Option<User> = None;
+    if let Some(role) = p.role {
+        updated = state.auth.update_role(&id, role).map_err(bad_request_err)?;
+        if updated.is_none() {
+            return Err(not_found("user"));
+        }
+        audit_users_write(user_ext.as_deref(), &id, "update_role");
+    }
+    if let Some(pw) = p.password.filter(|s| !s.is_empty()) {
+        let changed = state
+            .auth
+            .update_password(&id, &pw)
+            .map_err(bad_request_err)?;
+        if !changed {
+            return Err(not_found("user"));
+        }
+        updated = state.auth.find_by_id(&id).map_err(internal_err)?;
+        audit_users_write(user_ext.as_deref(), &id, "reset_password");
+    }
+    Ok(Json((&updated.expect("at least one field updated")).into()))
+}
+
+/// `DELETE /admin/users/:id` — remove a user + their active sessions.
+/// Refuses to delete the caller (self-delete is a footgun), and refuses
+/// to delete the last admin.
+pub async fn delete_user(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    if let Some(acting) = user_ext.as_deref() {
+        if acting.id == id {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "you can't delete your own account — ask another admin".to_string(),
+                }),
+            ));
+        }
+    }
+    let removed = state.auth.delete_user(&id).map_err(bad_request_err)?;
+    if !removed {
+        return Err(not_found("user"));
+    }
+    audit_users_write(user_ext.as_deref(), &id, "delete");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn audit_users_write(actor: Option<&User>, target_id: &str, action: &str) {
+    let actor_id = actor.map(|u| u.id.as_str()).unwrap_or("unknown");
+    let actor_email = actor.map(|u| u.email.as_str()).unwrap_or("");
+    tracing::info!(
+        target: "lumen::audit",
+        actor_id,
+        actor_email,
+        target_id,
+        action,
+        "user admin change"
+    );
+}
+
+fn bad_request_err(e: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            error: e.to_string(),
+        }),
+    )
+}
+
+fn not_found(thing: &str) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiError {
+            error: format!("{thing} not found"),
+        }),
+    )
+}
+
+// ── Admin: OIDC settings ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct OidcPayload {
+    /// OIDC issuer URL — used to discover endpoints via
+    /// `/.well-known/openid-configuration`. Empty string = clear.
+    #[serde(default)]
+    pub issuer_url: Option<String>,
+    /// OIDC client ID registered with the IdP. Empty string = clear.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// OIDC client secret. Omitted = leave existing in place;
+    /// empty string = clear.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// IdP group name (claim) → Lumen role. Each entry maps one
+    /// upstream group to one of the four built-in roles.
+    #[serde(default)]
+    pub group_mappings: Option<Vec<settings_mod::OidcGroupMapping>>,
+}
+
+/// `PUT /admin/settings/oidc`
+pub async fn put_oidc(
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+    Json(p): Json<OidcPayload>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    state
+        .settings
+        .set_oidc(p.issuer_url, p.client_id, p.client_secret, p.group_mappings)
+        .map_err(bad_request_err)?;
+    audit_settings_write(user_ext.as_deref(), settings_mod::id::OIDC, "update");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /admin/settings/oidc`
+pub async fn delete_oidc(
+    State(state): State<AppState>,
+    user_ext: Option<axum::extract::Extension<User>>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    state.settings.clear_oidc().map_err(internal_err)?;
+    audit_settings_write(user_ext.as_deref(), settings_mod::id::OIDC, "clear");
     Ok(StatusCode::NO_CONTENT)
 }
 

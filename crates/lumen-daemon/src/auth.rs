@@ -148,7 +148,36 @@ impl AuthStore {
         Ok(table.len()? as usize)
     }
 
+    /// All users, ordered by `created_at` ascending (oldest first). Used
+    /// by the admin Users page and by the "is there at least one admin
+    /// left?" guards in `update_role` / `delete_user`.
+    pub fn list_users(&self) -> Result<Vec<User>> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(USERS)?;
+        let mut out: Vec<User> = Vec::new();
+        for entry in table.iter()? {
+            let (_, v) = entry?;
+            out.push(serde_json::from_str(v.value())?);
+        }
+        out.sort_by_key(|u| u.created_at);
+        Ok(out)
+    }
+
+    fn admin_count(&self) -> Result<usize> {
+        Ok(self
+            .list_users()?
+            .iter()
+            .filter(|u| u.role == Role::Admin)
+            .count())
+    }
+
     pub fn create_user(&self, email: &str, password: &str, role: Role) -> Result<User> {
+        validate_email(email)?;
+        validate_password(password)?;
+        // Email uniqueness — keyed scan is fine at admin-list scale.
+        if self.find_by_email(email)?.is_some() {
+            anyhow::bail!("a user with email {email} already exists");
+        }
         let id = random_id();
         let password_hash = hash_password(password)?;
         let user = User {
@@ -166,6 +195,105 @@ impl AuthStore {
         }
         txn.commit()?;
         Ok(user)
+    }
+
+    /// Set a user's role. Refuses to demote the last remaining admin —
+    /// the system must always have at least one admin who can run the
+    /// admin panel.
+    pub fn update_role(&self, id: &str, role: Role) -> Result<Option<User>> {
+        let Some(mut user) = self.find_by_id(id)? else {
+            return Ok(None);
+        };
+        if user.role == role {
+            return Ok(Some(user));
+        }
+        if user.role == Role::Admin && role != Role::Admin && self.admin_count()? <= 1 {
+            anyhow::bail!(
+                "cannot demote the last admin — promote another user first, then change this one"
+            );
+        }
+        user.role = role;
+        self.write_user(&user)?;
+        Ok(Some(user))
+    }
+
+    /// Set a new password for `id`. Returns false if the user doesn't
+    /// exist. Used by the admin "reset password" flow — the user picks
+    /// a new one on next sign-in (or the admin shares the temp value
+    /// out-of-band; we don't email it from the daemon).
+    pub fn update_password(&self, id: &str, new_password: &str) -> Result<bool> {
+        validate_password(new_password)?;
+        let Some(mut user) = self.find_by_id(id)? else {
+            return Ok(false);
+        };
+        user.password_hash = hash_password(new_password)?;
+        self.write_user(&user)?;
+        // Invalidate every session for this user — the password just
+        // changed, so any open browser tabs need to log back in.
+        self.delete_sessions_for(id)?;
+        Ok(true)
+    }
+
+    /// Remove the user and every active session of theirs. Refuses to
+    /// delete the last admin (same reasoning as `update_role`).
+    pub fn delete_user(&self, id: &str) -> Result<bool> {
+        let Some(user) = self.find_by_id(id)? else {
+            return Ok(false);
+        };
+        if user.role == Role::Admin && self.admin_count()? <= 1 {
+            anyhow::bail!(
+                "cannot delete the last admin — promote another user first, then delete this one"
+            );
+        }
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(USERS)?;
+            table.remove(id)?;
+        }
+        txn.commit()?;
+        self.delete_sessions_for(id)?;
+        Ok(true)
+    }
+
+    fn write_user(&self, user: &User) -> Result<()> {
+        let serialised = serde_json::to_string(user).context("auth: serialise user")?;
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(USERS)?;
+            table.insert(user.id.as_str(), serialised.as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Delete every session belonging to `user_id`. Called when a user
+    /// is deleted or their password is rotated.
+    fn delete_sessions_for(&self, user_id: &str) -> Result<()> {
+        let mut to_remove: Vec<String> = Vec::new();
+        {
+            let txn = self.db.begin_read()?;
+            let table = txn.open_table(SESSIONS)?;
+            for entry in table.iter()? {
+                let (k, v) = entry?;
+                if let Ok(session) = serde_json::from_str::<StoredSession>(v.value()) {
+                    if session.user_id == user_id {
+                        to_remove.push(k.value().to_string());
+                    }
+                }
+            }
+        }
+        if to_remove.is_empty() {
+            return Ok(());
+        }
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(SESSIONS)?;
+            for token in &to_remove {
+                table.remove(token.as_str())?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
     }
 
     pub fn find_by_email(&self, email: &str) -> Result<Option<User>> {
@@ -263,6 +391,39 @@ fn hash_password(password: &str) -> Result<String> {
     Ok(hash)
 }
 
+/// Crude but sufficient: must contain an `@` and at least one character
+/// either side, with no internal whitespace. Real email validation is
+/// famously unbounded; we just catch the obvious typos. We don't require
+/// a dot in the domain — lab setups like `admin@localhost` or short TLDs
+/// (`alice@corp`) are legitimate.
+fn validate_email(email: &str) -> Result<()> {
+    let trimmed = email.trim();
+    if trimmed.is_empty() || trimmed.len() > 320 {
+        anyhow::bail!("email must be between 1 and 320 characters");
+    }
+    if trimmed.contains(char::is_whitespace) {
+        anyhow::bail!("email must not contain whitespace");
+    }
+    let mut parts = trimmed.splitn(2, '@');
+    let (local, domain) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    if local.is_empty() || domain.is_empty() {
+        anyhow::bail!("'{trimmed}' is not a recognisable email address");
+    }
+    Ok(())
+}
+
+/// Minimum 8 chars, no whitespace at start/end. Deliberately not opinionated
+/// — admins manage policy out-of-band, the daemon just enforces a floor.
+fn validate_password(password: &str) -> Result<()> {
+    if password.len() < 8 {
+        anyhow::bail!("password must be at least 8 characters");
+    }
+    if password != password.trim() {
+        anyhow::bail!("password must not start or end with whitespace");
+    }
+    Ok(())
+}
+
 fn random_id() -> String {
     let mut bytes = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -332,5 +493,144 @@ mod tests {
         let hash = hash_password("correct").unwrap();
         assert!(verify_password("correct", &hash));
         assert!(!verify_password("wrong", &hash));
+    }
+
+    // ── User CRUD (admin panel surface) ─────────────────────────────────
+
+    #[test]
+    fn list_users_returns_creation_order() {
+        let (_dir, store) = open_store();
+        let a = store
+            .create_user("a@x.com", "passw0rd", Role::Admin)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let b = store
+            .create_user("b@x.com", "passw0rd", Role::Viewer)
+            .unwrap();
+        let list = store.list_users().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, a.id);
+        assert_eq!(list[1].id, b.id);
+    }
+
+    #[test]
+    fn duplicate_email_is_rejected() {
+        let (_dir, store) = open_store();
+        store
+            .create_user("a@x.com", "passw0rd", Role::Admin)
+            .unwrap();
+        let err = store
+            .create_user("a@x.com", "passw0rd", Role::Viewer)
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn update_role_changes_role() {
+        let (_dir, store) = open_store();
+        store
+            .create_user("admin@x.com", "passw0rd", Role::Admin)
+            .unwrap();
+        let viewer = store
+            .create_user("v@x.com", "passw0rd", Role::Viewer)
+            .unwrap();
+        store.update_role(&viewer.id, Role::Operator).unwrap();
+        assert_eq!(
+            store.find_by_id(&viewer.id).unwrap().unwrap().role,
+            Role::Operator
+        );
+    }
+
+    #[test]
+    fn cannot_demote_last_admin() {
+        let (_dir, store) = open_store();
+        let admin = store
+            .create_user("admin@x.com", "passw0rd", Role::Admin)
+            .unwrap();
+        let err = store.update_role(&admin.id, Role::Viewer).unwrap_err();
+        assert!(err.to_string().contains("last admin"));
+        // With a second admin, demotion is fine.
+        let other = store
+            .create_user("a2@x.com", "passw0rd", Role::Admin)
+            .unwrap();
+        store.update_role(&admin.id, Role::Viewer).unwrap();
+        assert_eq!(
+            store.find_by_id(&other.id).unwrap().unwrap().role,
+            Role::Admin
+        );
+    }
+
+    #[test]
+    fn cannot_delete_last_admin() {
+        let (_dir, store) = open_store();
+        let admin = store
+            .create_user("admin@x.com", "passw0rd", Role::Admin)
+            .unwrap();
+        assert!(store
+            .delete_user(&admin.id)
+            .unwrap_err()
+            .to_string()
+            .contains("last admin"));
+    }
+
+    #[test]
+    fn delete_user_invalidates_their_sessions() {
+        let (_dir, store) = open_store();
+        store
+            .create_user("admin@x.com", "passw0rd", Role::Admin)
+            .unwrap();
+        let v = store
+            .create_user("v@x.com", "passw0rd", Role::Viewer)
+            .unwrap();
+        let token = store.create_session(&v.id).unwrap();
+        assert!(store.lookup_session(&token).unwrap().is_some());
+        store.delete_user(&v.id).unwrap();
+        assert!(store.lookup_session(&token).unwrap().is_none());
+    }
+
+    #[test]
+    fn update_password_invalidates_existing_sessions() {
+        let (_dir, store) = open_store();
+        let u = store
+            .create_user("a@x.com", "passw0rd", Role::Admin)
+            .unwrap();
+        let token = store.create_session(&u.id).unwrap();
+        store.update_password(&u.id, "newpassword").unwrap();
+        // Old session is gone; user can still sign in with the new password.
+        assert!(store.lookup_session(&token).unwrap().is_none());
+        let refreshed = store.find_by_email("a@x.com").unwrap().unwrap();
+        assert!(verify_password("newpassword", &refreshed.password_hash));
+        assert!(!verify_password("passw0rd", &refreshed.password_hash));
+    }
+
+    #[test]
+    fn short_password_rejected_on_create_and_update() {
+        let (_dir, store) = open_store();
+        assert!(store.create_user("a@x.com", "short", Role::Admin).is_err());
+        let u = store
+            .create_user("a@x.com", "passw0rd", Role::Admin)
+            .unwrap();
+        assert!(store.update_password(&u.id, "tiny").is_err());
+    }
+
+    #[test]
+    fn malformed_email_rejected() {
+        let (_dir, store) = open_store();
+        assert!(store
+            .create_user("no-at-sign", "passw0rd", Role::Admin)
+            .is_err());
+        assert!(store
+            .create_user("@nolocal", "passw0rd", Role::Admin)
+            .is_err());
+        assert!(store
+            .create_user("local@", "passw0rd", Role::Admin)
+            .is_err());
+        assert!(store
+            .create_user("has space@x.com", "passw0rd", Role::Admin)
+            .is_err());
+        // Lab-style emails without a domain dot stay legal.
+        assert!(store
+            .create_user("admin@localhost", "passw0rd", Role::Admin)
+            .is_ok());
     }
 }

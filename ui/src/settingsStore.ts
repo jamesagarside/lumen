@@ -4,7 +4,7 @@ import { createSignal, type Accessor } from "solid-js";
 /// object is loosely-typed because each integration carries different
 /// fields (controller_url / username / site / etc.); the section
 /// components narrow it when rendering.
-export type IntegrationId = "unifi_labels" | "unifi_ips" | "webhook";
+export type IntegrationId = "unifi_labels" | "unifi_ips" | "webhook" | "oidc";
 
 export type ConfigSource = "db" | "env";
 
@@ -48,6 +48,27 @@ export interface WebhookPayload {
   url?: string | null;
 }
 
+/** Mirrors `settings::OidcGroupMapping` on the Rust side. */
+export interface OidcGroupMapping {
+  group: string;
+  role: UserRole;
+}
+
+export interface OidcPayload {
+  issuer_url?: string | null;
+  client_id?: string | null;
+  /** Omitted = leave existing in place; empty = clear. */
+  client_secret?: string | null;
+  /** Omitted = leave existing mappings; sending [] clears them. */
+  group_mappings?: OidcGroupMapping[] | null;
+}
+
+/// Lumen's four built-in roles. Mirrors `auth::Role`. The roles list
+/// itself comes from `/admin/roles` (so labels + descriptions stay
+/// server-authoritative), this type exists for compile-time safety
+/// when a known role id flows through the UI.
+export type UserRole = "admin" | "operator" | "viewer" | "noc_display";
+
 export interface SettingsStore {
   statuses: Accessor<IntegrationStatus[] | null>;
   loading: Accessor<boolean>;
@@ -57,6 +78,7 @@ export interface SettingsStore {
   saveUnifiLabels: (p: UnifiLabelsPayload) => Promise<void>;
   saveUnifiIps: (p: UnifiIpsPayload) => Promise<void>;
   saveWebhook: (p: WebhookPayload) => Promise<void>;
+  saveOidc: (p: OidcPayload) => Promise<void>;
   clear: (id: IntegrationId) => Promise<void>;
 }
 
@@ -116,6 +138,7 @@ export const createSettingsStore = (): SettingsStore => {
     saveUnifiLabels: (p) => put("/admin/settings/unifi_labels", p),
     saveUnifiIps: (p) => put("/admin/settings/unifi_ips", p),
     saveWebhook: (p) => put("/admin/settings/webhook", p),
+    saveOidc: (p) => put("/admin/settings/oidc", p),
     clear: async (id) => {
       setError(null);
       const res = await fetch(`/admin/settings/${id}`, {

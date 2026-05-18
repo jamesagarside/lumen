@@ -23,6 +23,7 @@ use anyhow::{Context, Result};
 use redb::{Database, TableDefinition};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::Role;
 use crate::secret_store::SecretStore;
 
 /// `settings`: integration-id → JSON-serialised plain-field struct.
@@ -36,6 +37,7 @@ pub mod id {
     pub const UNIFI_LABELS: &str = "unifi_labels";
     pub const UNIFI_IPS: &str = "unifi_ips";
     pub const WEBHOOK: &str = "webhook";
+    pub const OIDC: &str = "oidc";
 }
 
 /// Names of the secret-store entries. Stable across versions — these
@@ -43,6 +45,7 @@ pub mod id {
 mod secret_name {
     pub const UDM_API_KEY: &str = "unifi_labels.api_key";
     pub const UDM_PASSWORD: &str = "unifi_ips.password";
+    pub const OIDC_CLIENT_SECRET: &str = "oidc.client_secret";
 }
 
 /// UniFi *labels* integration (Network Integration API). Plain
@@ -92,6 +95,50 @@ pub struct WebhookPlain {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebhookConfig {
     pub url: String,
+}
+
+// ── OIDC ────────────────────────────────────────────────────────────────────
+
+/// IdP group claim → Lumen role mapping. When a user signs in via OIDC
+/// (#14), the daemon looks up their group claim values and picks the
+/// first matching mapping. The order matters — first match wins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OidcGroupMapping {
+    pub group: String,
+    pub role: Role,
+}
+
+/// Plain (non-secret) OIDC config. Mirrors the shape stored under the
+/// `oidc` settings key. The client_secret lives in the encrypted store
+/// and is never serialised alongside this.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OidcPlain {
+    /// Issuer URL (no trailing slash). The daemon discovers endpoints
+    /// via `${issuer}/.well-known/openid-configuration` when the login
+    /// flow lands in #14.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_url: Option<String>,
+    /// Client ID registered with the IdP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Ordered list of group → role mappings. First match wins; users
+    /// whose groups don't match anything get rejected at login time
+    /// rather than being silently created with no role.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_mappings: Vec<OidcGroupMapping>,
+}
+
+/// Fully-resolved OIDC config — issuer + client + secret + mappings.
+/// Currently unused at runtime call sites; the discovery / login flow
+/// that consumes this lands in #14. The admin UI configures it now so
+/// admins can stage their IdP integration ahead of the flow shipping.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OidcConfig {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub group_mappings: Vec<OidcGroupMapping>,
 }
 
 /// Whether a piece of admin-managed config was sourced from the DB
@@ -354,12 +401,120 @@ impl SettingsStore {
         })
     }
 
+    // ── OIDC ──────────────────────────────────────────────────────────────
+
+    /// Resolve the full OIDC config. Returns `None` when issuer URL or
+    /// client_id is missing — those are the two pieces the login flow
+    /// can't proceed without. Group mappings are allowed to be empty
+    /// (in which case every authenticated user gets rejected; useful
+    /// for testing the discovery half before role-mapping is set up).
+    #[allow(dead_code)] // Consumed by the OIDC login flow in #14.
+    pub fn get_oidc(&self) -> Result<Option<OidcConfig>> {
+        let plain = self.read_plain::<OidcPlain>(id::OIDC)?;
+        let issuer_url = plain.as_ref().and_then(|p| p.issuer_url.clone());
+        let client_id = plain.as_ref().and_then(|p| p.client_id.clone());
+        let client_secret = self.secrets.get(secret_name::OIDC_CLIENT_SECRET)?;
+        let group_mappings = plain
+            .as_ref()
+            .map(|p| p.group_mappings.clone())
+            .unwrap_or_default();
+        match (issuer_url, client_id, client_secret) {
+            (Some(issuer_url), Some(client_id), Some(client_secret)) => Ok(Some(OidcConfig {
+                issuer_url,
+                client_id,
+                client_secret,
+                group_mappings,
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn set_oidc(
+        &self,
+        issuer_url: Option<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+        group_mappings: Option<Vec<OidcGroupMapping>>,
+    ) -> Result<()> {
+        // Read existing → patch → write. Lets callers update one field
+        // at a time without having to re-send the whole thing.
+        let mut existing = self.read_plain::<OidcPlain>(id::OIDC)?.unwrap_or_default();
+        if let Some(url) = issuer_url {
+            let trimmed = url.trim();
+            existing.issuer_url = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.trim_end_matches('/').to_string())
+            };
+        }
+        if let Some(cid) = client_id {
+            let trimmed = cid.trim();
+            existing.client_id = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(mappings) = group_mappings {
+            // Reject duplicate group names — first-match-wins makes
+            // duplicates silently dead, surface the mistake at edit time.
+            let mut seen = std::collections::HashSet::new();
+            for m in &mappings {
+                let g = m.group.trim();
+                if g.is_empty() {
+                    anyhow::bail!("group mapping has an empty group name");
+                }
+                if !seen.insert(g.to_lowercase()) {
+                    anyhow::bail!("duplicate group mapping for '{g}'");
+                }
+            }
+            existing.group_mappings = mappings
+                .into_iter()
+                .map(|m| OidcGroupMapping {
+                    group: m.group.trim().to_string(),
+                    role: m.role,
+                })
+                .collect();
+        }
+        self.write_plain(id::OIDC, &existing)?;
+        if let Some(secret) = client_secret {
+            let trimmed = secret.trim();
+            if trimmed.is_empty() {
+                self.secrets.delete(secret_name::OIDC_CLIENT_SECRET)?;
+            } else {
+                self.secrets.put(secret_name::OIDC_CLIENT_SECRET, trimmed)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn clear_oidc(&self) -> Result<()> {
+        self.delete_plain(id::OIDC)?;
+        self.secrets.delete(secret_name::OIDC_CLIENT_SECRET)?;
+        Ok(())
+    }
+
+    pub fn oidc_status(&self) -> Result<IntegrationStatus> {
+        let plain = self.read_plain::<OidcPlain>(id::OIDC)?;
+        let plain_source = plain_source(plain.is_some(), false);
+        let resolved = plain.unwrap_or_default();
+        let secret_in_db = self.secrets.has(secret_name::OIDC_CLIENT_SECRET)?;
+        Ok(IntegrationStatus {
+            id: id::OIDC,
+            plain: serde_json::to_value(resolved)?,
+            plain_source,
+            secret_configured: secret_in_db,
+            secret_source: plain_source_for(secret_in_db, false),
+        })
+    }
+
     /// One-stop status fetch for the admin UI.
     pub fn all_statuses(&self) -> Result<Vec<IntegrationStatus>> {
         Ok(vec![
             self.unifi_labels_status()?,
             self.unifi_ips_status()?,
             self.webhook_status()?,
+            self.oidc_status()?,
         ])
     }
 }
@@ -523,12 +678,128 @@ mod tests {
     }
 
     #[test]
-    fn all_statuses_covers_three_integrations() {
+    fn all_statuses_covers_every_integration() {
         let _g = clear_env();
         let (_dir, store) = open_store();
         let statuses = store.all_statuses().unwrap();
         let ids: Vec<&str> = statuses.iter().map(|s| s.id).collect();
-        assert_eq!(ids, vec![id::UNIFI_LABELS, id::UNIFI_IPS, id::WEBHOOK]);
+        assert_eq!(
+            ids,
+            vec![id::UNIFI_LABELS, id::UNIFI_IPS, id::WEBHOOK, id::OIDC]
+        );
+    }
+
+    // ── OIDC ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn oidc_round_trip() {
+        let _g = clear_env();
+        let (_dir, store) = open_store();
+        assert!(store.get_oidc().unwrap().is_none());
+        store
+            .set_oidc(
+                Some("https://idp.example.com/".to_string()),
+                Some("lumen-client".to_string()),
+                Some("super-secret".to_string()),
+                Some(vec![
+                    OidcGroupMapping {
+                        group: "Lumen Admins".to_string(),
+                        role: Role::Admin,
+                    },
+                    OidcGroupMapping {
+                        group: "Lumen Viewers".to_string(),
+                        role: Role::Viewer,
+                    },
+                ]),
+            )
+            .unwrap();
+        let cfg = store.get_oidc().unwrap().unwrap();
+        assert_eq!(cfg.issuer_url, "https://idp.example.com"); // trailing / stripped
+        assert_eq!(cfg.client_id, "lumen-client");
+        assert_eq!(cfg.client_secret, "super-secret");
+        assert_eq!(cfg.group_mappings.len(), 2);
+        assert_eq!(cfg.group_mappings[0].role, Role::Admin);
+    }
+
+    #[test]
+    fn oidc_secret_never_in_status() {
+        let _g = clear_env();
+        let (_dir, store) = open_store();
+        store
+            .set_oidc(
+                Some("https://idp.example.com".to_string()),
+                Some("client".to_string()),
+                Some("plaintext-secret".to_string()),
+                None,
+            )
+            .unwrap();
+        let status = store.oidc_status().unwrap();
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(!json.contains("plaintext-secret"));
+        assert!(json.contains("\"secret_configured\":true"));
+    }
+
+    #[test]
+    fn oidc_duplicate_group_rejected() {
+        let _g = clear_env();
+        let (_dir, store) = open_store();
+        let err = store
+            .set_oidc(
+                Some("https://idp.example.com".to_string()),
+                Some("c".to_string()),
+                Some("s".to_string()),
+                Some(vec![
+                    OidcGroupMapping {
+                        group: "team".to_string(),
+                        role: Role::Admin,
+                    },
+                    OidcGroupMapping {
+                        group: "Team".to_string(), // case-insensitive collision
+                        role: Role::Viewer,
+                    },
+                ]),
+            )
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("duplicate"));
+    }
+
+    #[test]
+    fn oidc_clear_removes_all_fields() {
+        let _g = clear_env();
+        let (_dir, store) = open_store();
+        store
+            .set_oidc(
+                Some("https://idp.example.com".to_string()),
+                Some("c".to_string()),
+                Some("s".to_string()),
+                None,
+            )
+            .unwrap();
+        store.clear_oidc().unwrap();
+        let status = store.oidc_status().unwrap();
+        assert_eq!(status.plain_source, None);
+        assert!(!status.secret_configured);
+    }
+
+    #[test]
+    fn oidc_partial_update_preserves_secret() {
+        let _g = clear_env();
+        let (_dir, store) = open_store();
+        store
+            .set_oidc(
+                Some("https://idp.example.com".to_string()),
+                Some("c1".to_string()),
+                Some("the-secret".to_string()),
+                None,
+            )
+            .unwrap();
+        // Change just the client_id; don't touch the secret.
+        store
+            .set_oidc(None, Some("c2".to_string()), None, None)
+            .unwrap();
+        let cfg = store.get_oidc().unwrap().unwrap();
+        assert_eq!(cfg.client_id, "c2");
+        assert_eq!(cfg.client_secret, "the-secret");
     }
 
     #[test]

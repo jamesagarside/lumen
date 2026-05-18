@@ -216,6 +216,38 @@ fn build_router(config: &config::Config, state: AppState) -> Router {
                     crate::auth::cap::MANAGE_SETTINGS,
                 ))),
         )
+        .route(
+            "/admin/settings/oidc",
+            put(routes::put_oidc)
+                .delete(routes::delete_oidc)
+                .route_layer(middleware::from_fn(routes::require_cap(
+                    crate::auth::cap::MANAGE_SETTINGS,
+                ))),
+        )
+        // Admin user management.
+        .route(
+            "/admin/users",
+            get(routes::list_users)
+                .post(routes::create_user)
+                .route_layer(middleware::from_fn(routes::require_cap(
+                    crate::auth::cap::MANAGE_USERS,
+                ))),
+        )
+        .route(
+            "/admin/users/:id",
+            patch(routes::patch_user)
+                .delete(routes::delete_user)
+                .route_layer(middleware::from_fn(routes::require_cap(
+                    crate::auth::cap::MANAGE_USERS,
+                ))),
+        )
+        // Role/capability reference — readable by anyone with manage_users.
+        .route(
+            "/admin/roles",
+            get(routes::list_roles).route_layer(middleware::from_fn(routes::require_cap(
+                crate::auth::cap::MANAGE_USERS,
+            ))),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             routes::auth_extension,
@@ -597,9 +629,12 @@ mod tests {
         let body = read_body_json(response).await;
         let arr = body.as_array().expect("array");
         let ids: Vec<&str> = arr.iter().map(|s| s["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, vec!["unifi_labels", "unifi_ips", "webhook"]);
+        assert_eq!(ids, vec!["unifi_labels", "unifi_ips", "webhook", "oidc"]);
         for s in arr {
             assert_eq!(s["secret_configured"], false);
+            // OIDC isn't supervised as a polled integration — login flow
+            // consumes the config at sign-in time (#14) — but it still
+            // reports `running: false` for response-shape consistency.
             assert_eq!(s["running"], false);
             assert!(s["plain_source"].is_null());
         }
