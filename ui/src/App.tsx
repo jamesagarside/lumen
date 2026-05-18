@@ -285,8 +285,10 @@ const AuthedApp: Component<AuthedAppProps> = (props) => {
           >
             <NodeInspector
               snapshot={effectiveSnapshot()}
+              events={eventsStore.events()}
               selectedId={selectedNode()}
               onClose={() => setSelectedNode(null)}
+              onSelectIp={(ip) => setSelectedNode(ip)}
               onLabelSaved={() => {
                 // Snapshot poll picks up the new label on the next tick.
               }}
